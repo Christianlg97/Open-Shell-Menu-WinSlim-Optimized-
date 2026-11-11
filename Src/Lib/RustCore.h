@@ -65,21 +65,42 @@ inline int WinSlimNextLine(const wchar_t *text, size_t length, size_t *cursor, s
 	*cursor=length;
 	return 0;
 }
+// Same tokens as the Rust core and the original GetToken: spaces separate them and
+// a leading quote groups everything up to the next quote (or the end) into one.
+inline bool WinSlimNextToken(const wchar_t *search, size_t length, size_t &at, size_t &first, size_t &last)
+{
+	while (at<length)
+	{
+		while (at<length && search[at]==' ') at++;
+		if (at>=length) return false;
+		if (search[at]=='"')
+		{
+			first=++at;
+			while (at<length && search[at]!='"') at++;
+			last=at;
+			if (at<length) at++; // skip the closing quote
+		}
+		else
+		{
+			first=at;
+			while (at<length && search[at]!=' ') at++;
+			last=at;
+		}
+		if (first<last) return true;
+	}
+	return false;
+}
 inline int WinSlimMatchText(const wchar_t *search, size_t searchLength, const wchar_t *text, size_t textLength, int subword)
 {
 	if ((!search && searchLength) || !text || !textLength || searchLength>16*1024*1024+1 || textLength>16*1024*1024+1) return 0;
-	for (size_t at=0;at<searchLength;)
+	for (size_t at=0, first=0, last=0;WinSlimNextToken(search,searchLength,at,first,last);)
 	{
-		while (at<searchLength && search[at]==' ') at++;
-		size_t first=at;
-		while (at<searchLength && search[at]!=' ') at++;
-		if (first==at) continue;
 		bool found=false;
 		for (size_t pos=0;pos<textLength;)
 		{
 			if (!subword) while (pos<textLength && wcschr(L" \t.,$&[]{}();|",text[pos])) pos++;
 			if (pos<textLength && FindNLSStringEx(LOCALE_NAME_USER_DEFAULT,(subword?FIND_FROMSTART:FIND_STARTSWITH)|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC,
-				text+pos,(int)(textLength-pos),search+first,(int)(at-first),NULL,NULL,NULL,0)>=0) { found=true; break; }
+				text+pos,(int)(textLength-pos),search+first,(int)(last-first),NULL,NULL,NULL,0)>=0) { found=true; break; }
 			if (subword) break;
 			while (pos<textLength && !wcschr(L" \t.,$&[]{}();|",text[pos])) pos++;
 		}

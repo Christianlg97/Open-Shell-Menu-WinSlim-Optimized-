@@ -43,6 +43,12 @@ int main()
 	Require(!matches(L"shell",L"Windows PowerShell",false),"Word boundary ignored");
 	Require(matches(L"shell",L"Windows PowerShell",true),"Substring matching changed");
 	Require(matches(std::wstring(200,L'x'),std::wstring(200,L'x'),true),"Long query was truncated");
+	Require(matches(L"\"visual studio\"",L"Visual Studio Code",false),"Quoted phrase was split into words");
+	Require(matches(L"\"studio code\" vis",L"Visual Studio Code",false),"Quoted phrase with another token failed");
+	Require(!matches(L"\"visual code\"",L"Visual Studio Code",false),"Quoted phrase matched out of order");
+	Require(matches(L"\"o co\"",L"Visual Studio Code",true),"Quoted substring failed");
+	Require(!matches(L"\"o co\"",L"Visual Studio Code",false),"Quoted phrase ignored word boundaries");
+	Require(matches(L"\"visual",L"Visual Studio Code",false),"Unterminated quote was not closed at the end");
 	// Compare the C ABI against the user's Windows locale, rather than assuming
 	// invariant or English collation in the Rust implementation.
 	for (const wchar_t *value:{L"I",L"\x0130",L"\x0131",L"\x00DF",L"\x00E9"})

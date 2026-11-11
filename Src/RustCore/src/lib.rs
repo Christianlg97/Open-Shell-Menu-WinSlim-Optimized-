@@ -198,32 +198,61 @@ fn contains(text: &[u16], token: &[u16], prefix: bool) -> bool {
     }
 }
 
+const SPACE: u16 = 32;
+const QUOTE: u16 = 34;
+
+/// Splits a query like the original `GetToken`: spaces separate tokens and a
+/// leading quote groups everything up to the next quote (or the end) into one.
+struct Tokens<'a> {
+    rest: &'a [u16],
+}
+
+impl<'a> Iterator for Tokens<'a> {
+    type Item = &'a [u16];
+
+    fn next(&mut self) -> Option<&'a [u16]> {
+        loop {
+            let start = self.rest.iter().position(|&c| c != SPACE)?;
+            let rest = &self.rest[start..];
+            let (token, next) = if rest[0] == QUOTE {
+                let body = &rest[1..];
+                let end = body.iter().position(|&c| c == QUOTE).unwrap_or(body.len());
+                (&body[..end], body.get(end + 1..).unwrap_or(&[]))
+            } else {
+                let end = rest.iter().position(|&c| c == SPACE).unwrap_or(rest.len());
+                (&rest[..end], &rest[end..])
+            };
+            self.rest = next;
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+    }
+}
+
 fn match_text(search: &[u16], text: &[u16], subword: bool) -> bool {
     if text.is_empty() {
         return false;
     }
-    search
-        .split(|c| *c == 32)
-        .filter(|s| !s.is_empty())
-        .all(|token| {
-            if subword {
-                return contains(text, token, false);
+    Tokens { rest: search }.all(|token| {
+        if subword {
+            return contains(text, token, false);
+        }
+        let separators = [32, 9, 46, 44, 36, 38, 91, 93, 123, 125, 40, 41, 59, 124];
+        let mut at = 0;
+        while at < text.len() {
+            while at < text.len() && separators.contains(&text[at]) {
+                at += 1;
             }
-            let separators = [32, 9, 46, 44, 36, 38, 91, 93, 123, 125, 40, 41, 59, 124];
-            let mut at = 0;
-            while at < text.len() {
-                while at < text.len() && separators.contains(&text[at]) {
-                    at += 1;
-                }
-                if at < text.len() && contains(&text[at..], token, true) {
-                    return true;
-                }
-                while at < text.len() && !separators.contains(&text[at]) {
-                    at += 1;
-                }
+            if at < text.len() && contains(&text[at..], token, true) {
+                return true;
             }
-            false
-        })
+            while at < text.len() && !separators.contains(&text[at]) {
+                at += 1;
+            }
+        }
+        false
+    })
 }
 
 /// # Safety
@@ -298,6 +327,23 @@ mod tests {
         assert!(!match_text(&wide("win"), &[], true));
         let long = "x".repeat(200);
         assert!(match_text(&wide(&long), &wide(&long), true));
+    }
+
+    #[test]
+    fn quoted_phrases_are_single_tokens() {
+        let tokens: Vec<String> = Tokens {
+            rest: &wide("  \"a b\"c  d \"\" "),
+        }
+        .map(|token| String::from_utf16(token).unwrap())
+        .collect();
+        assert_eq!(tokens, ["a b", "c", "d"]);
+        let text = wide("Visual Studio Code");
+        assert!(match_text(&wide("\"visual studio\""), &text, false));
+        assert!(match_text(&wide("\"studio code\" vis"), &text, false));
+        assert!(!match_text(&wide("\"visual code\""), &text, false));
+        assert!(match_text(&wide("\"o co\""), &text, true));
+        assert!(!match_text(&wide("\"o co\""), &text, false));
+        assert!(match_text(&wide("\"visual"), &text, false));
     }
 
     #[test]

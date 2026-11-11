@@ -54,7 +54,7 @@ static int g_LoadDialogs[]=
 static CSetting g_Settings[]={
 {L"Update",CSetting::TYPE_GROUP},
 	{L"Language",CSetting::TYPE_STRING,0,0,L"",CSetting::FLAG_SHARED},
-	{L"Update",CSetting::TYPE_BOOL,0,0,1,CSetting::FLAG_SHARED},
+	{L"Update",CSetting::TYPE_BOOL,0,0,0,CSetting::FLAG_SHARED}, // WinSlim: off by default, the feed is upstream
 	{L"Nightly",CSetting::TYPE_BOOL,0,0,0,CSetting::FLAG_SHARED},
 
 	{NULL}

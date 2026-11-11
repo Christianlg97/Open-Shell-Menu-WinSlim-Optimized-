@@ -1430,18 +1430,23 @@ void CSearchManager::GetSearchResults( SearchResults &results )
 			}
 			results.programs.push_back(item.pInfo);
 		}
-		for (auto &item:settings)
+		// Match every setting exactly once on this (UI) thread: keep only the hits,
+		// rank them, then split them by category.
+		size_t matched=0;
+		for (size_t i=0;i<settings.size();i++)
 		{
-			int match=(item.category==CATEGORY_SETTING || item.category==CATEGORY_METROSETTING)?item.MatchText(searchText,bSearchSubWord):0;
+			SearchItem &item=settings[i];
+			if (item.category!=CATEGORY_SETTING && item.category!=CATEGORY_METROSETTING) continue;
+			int match=item.MatchText(searchText,bSearchSubWord);
+			if (!match) continue;
 			item.rank=(item.rank&0xFFFFFFFE)|(match>>1);
+			if (matched!=i) std::swap(settings[matched],item);
+			matched++;
 		}
+		settings.erase(settings.begin()+matched,settings.end());
 		std::sort(settings.begin(),settings.end());
 		for (const auto &item:settings)
-		{
-			if (!item.MatchText(searchText,bSearchSubWord)) continue;
-			if (item.category==CATEGORY_SETTING) results.settings.push_back(item.pInfo);
-			if (item.category==CATEGORY_METROSETTING) results.metrosettings.push_back(item.pInfo);
-		}
+			(item.category==CATEGORY_SETTING?results.settings:results.metrosettings).push_back(item.pInfo);
 	}
 	else
 	{

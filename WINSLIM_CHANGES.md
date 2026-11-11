@@ -2,34 +2,92 @@
 
 ## Compilar los MSI separados
 
-Desde PowerShell en la carpeta del proyecto:
+Desde CMD en la carpeta del proyecto:
 
-```powershell
+```bat
 .\build.cmd
-.\build.cmd -Version 4.4.1000 -Language Spanish
+.\build.cmd -Version 4.4.1001 -Language Spanish
 ```
+
+Al abrir `build.cmd` con doble clic, la ventana espera una tecla al terminar,
+tanto si el build finaliza correctamente como si falla. Esto permite leer los
+errores de dependencias. La pausa también se aplica al ejecutarlo sin argumentos
+desde una consola; con argumentos devuelve el control directamente.
+
+El lanzador solo pide UAC cuando falta algún requisito que haya que instalar, o
+cuando quedan MSI de un build elevado anterior: `light.exe` elevado los marca con
+integridad alta y un build normal no puede borrarlos («Acceso denegado» en
+`Src\Setup\Temp`). Un build elevado baja después esa marca a Medio, de modo que el
+siguiente vuelve a compilar sin elevar. Si todo está presente, compila con el token
+normal del usuario. Al elevarse
+conserva los argumentos y muestra la salida en una consola CMD elevada. Los scripts
+PowerShell se usan como auxiliares internos y no abren una consola PowerShell. Si ya
+es administrador no vuelve a elevarse; `-CheckOnly` y `-NoInstall` nunca elevan.
+La pausa corresponde únicamente a
+la consola que realiza el trabajo. Si el título de CMD muestra «Seleccionar»,
+pulsa Esc para salir de ese modo de selección y permitir que continúe la consola.
 
 Se reutiliza el flujo original de binarios, idioma, MSI, bootstrapper EXE y
 archivos de distribución. Los resultados se publican directamente en
-`Src/Setup/Final/`:
+`Release/`, junto al `build.cmd` de la raíz del workspace:
 
-- `OpenShellSetup_4_4_1000_Spanish_x86.msi`
-- `OpenShellSetup_4_4_1000_Spanish_x64.msi`
+- `OpenShellSetup_4_4_1001_Spanish_x86.msi`
+- `OpenShellSetup_4_4_1001_Spanish_x64.msi`
 - El instalador EXE original, el MSI ARM64 y los paquetes de distribución.
 - Un archivo de comprobaciones SHA-256.
+
+En este proyecto la ruta es `OpenShell Rework for WinSlim/Release/`. Solo se
+publican los resultados de una compilación completada. Los scripts originales
+conservan sus salidas internas en `Src/Setup/Final`. Puede elegirse otra carpeta
+con `-OutputDirectory "C:\ruta\Release"`; el lanzador elevado conserva esa ruta.
 
 Cada MSI incluye sus CAB; no necesita ejecutar `Setup.exe extract`. El MSI x86
 mantiene la restricción original de instalación en Windows de 32 bits.
 
+### Reinicio automático del Explorador al instalar
+
+Los MSI y el instalador EXE cierran el Explorador antes de sustituir archivos y lo
+vuelven a abrir al terminar, como el comando "Reiniciar Explorador de archivos" de
+WinSlim Toolbox (`taskkill /f /im explorer.exe & start explorer.exe`). Así las DLL
+cargadas por Explorer no quedan en uso y se evita el error 1603 o el reinicio
+pendiente. Se aplica al instalar, actualizar y desinstalar:
+
+1. Tras cerrar `StartMenu.exe` y antes de `InstallValidate`, `SetupHelper exitExplorer`
+   pide al Explorador que salga limpiamente (la orden "Salir del Explorador" de la
+   barra de tareas) y termina a la fuerza lo que quede en 3 s. Solo actúa sobre los
+   `explorer.exe` de la sesión del usuario que instala, no sobre otras sesiones.
+2. Tras `InstallFinalize`, `SetupHelper startExplorer` lo vuelve a abrir y espera a
+   que exista la barra de tareas (hasta 15 s); después se inicia `StartMenu.exe`.
+   Si la instalación falla durante la transacción, la acción de rollback lo reabre.
+   El EXE, además, lo reabre si `msiexec` termina con error o cancelación.
+3. El Explorador se abre sin elevar aunque el instalador corra como administrador:
+   se usa el token limitado de la sesión (`sihost.exe`). Sin UAC dividido, se abre
+   igual que `start explorer.exe`.
+
+Solo se reabre un Explorador que el propio instalador cerró (marca volátil
+`HKCU\Software\OpenShellSetupStoppedExplorer`). Si se mata antes, como hace un
+script que ejecuta `taskkill` previamente, el instalador no abre otro y el script
+conserva el control. La desinstalación anidada de una actualización no lo toca.
+Para desactivarlo: `msiexec /i OpenShellSetup_...msi RESTARTEXPLORER=0`.
+
 Para generar únicamente los MSI x86 y x64, sin bootstrapper ni paquetes ARM64:
 
-```powershell
-.\build.cmd -Version 4.4.1000 -Language Spanish -MsiOnly
+```bat
+.\build.cmd -Version 4.4.1001 -Language Spanish -MsiOnly
 ```
 
 El modo `-MsiOnly` no requiere las herramientas C++ de ARM64 ni 7-Zip.
 El modo completo es el predeterminado; `-Full` permite indicarlo explícitamente.
 Los scripts originales siguen funcionando independientemente.
+
+Para iterar en local sin recompilar todo, `-Incremental` usa `/t:Build` en lugar
+de `/t:Rebuild` (binarios, Setup y tests nativos). MSBuild sigue recompilando lo
+que cambie, incluidas las opciones de compilación. Para distribuir, compila sin
+`-Incremental`:
+
+```bat
+.\build.cmd -MsiOnly -Incremental
+```
 
 Requisitos: Visual Studio 2022 con Desktop C++, ATL y Windows SDK, WiX **3.x**
 (la receta original usa 3.14), HTML Help Workshop, Rust MSVC mediante rustup,
@@ -38,13 +96,41 @@ además 7-Zip, el toolchain C++ de ARM64 y Debugging Tools for Windows (symstore
 Las herramientas pueden estar en PATH. El script prepara los targets Rust
 x86/x64, y ARM64 en el modo completo.
 
-```powershell
+`build.cmd` detecta e instala automáticamente los requisitos ausentes antes de
+compilar. Reutiliza Visual Studio 2022 y añade los componentes necesarios; WiX
+se guarda en `%LOCALAPPDATA%\OpenShellBuild\Tools`. Las descargas se conservan en
+`%LOCALAPPDATA%\OpenShellBuild\Downloads` y se verifican mediante SHA-256 o firma
+digital. La consola actual recibe las rutas nuevas sin tener que volver a abrirla.
+Windows puede solicitar permisos UAC para Visual Studio, SDK, 7-Zip y HTML Help.
+No se reinicia el equipo automáticamente: si un instalador requiere reinicio,
+el build se detiene con instrucciones para reiniciar y volver a ejecutarlo.
+
+Se usan descargas directas verificadas, sin exigir `winget`. La instalación de
+7-Zip escribe un registro en `%LOCALAPPDATA%\OpenShellBuild\Logs`, muestra el PID
+y tiempo de espera cada 15 segundos y se deja de esperar a los cinco minutos.
+El proceso no se termina automáticamente al agotar ese plazo. Un fallo o espera
+agotada impide continuar con la compilación. Los modificadores de `msiexec`
+se pasan sin comillas; solo se entrecomillan los valores que lo necesitan.
+
+HTML Help Workshop utiliza los bytes originales de Microsoft conservados en
+Archive.org, con SHA-256 fijado; su enlace original ya no está disponible.
+Se instala su compilador y se desactiva el actualizador antiguo `hhupd`.
+
+Para preparar las herramientas sin compilar, o impedir instalaciones automáticas:
+
+```bat
+.\build.cmd -InstallOnly
+.\build.cmd -NoInstall
+```
+
+```bat
 .\build.cmd -CheckOnly
 ```
 
 Comprueba requisitos sin compilar, instalar targets ni borrar salidas. Los fallos
 detienen el build y devuelven un código distinto de cero. `-SkipTests` permite
 omitir explícitamente las pruebas; no se recomienda para distribuir.
+`-CheckOnly` tampoco descarga ni instala herramientas.
 
 ## Migración a Rust y compatibilidad
 
@@ -65,14 +151,16 @@ leyendo `CurrentBuildNumber`; `VersionNT` no sirve para distinguir Windows 8.1
 de Windows 10/11. Para conservar Windows 7/8 con las implementaciones C++ del
 mismo contrato:
 
-```powershell
+```bat
 .\build.cmd -Legacy -MsiOnly
 ```
 
 Los scripts originales utilizan ese modo C++ por defecto. También puede elegirse
 en Visual Studio con `WinSlimUseRustCore=false`, o activarse Rust con
 `WinSlimUseRustCore=true`. El puente Rust cubre Win32, x64 y ARM64; ARM64EC
-conserva el modo C++.
+conserva automáticamente el modo C++, incluso cuando está activado Rust para
+el build completo. Esto incluye la compilación secundaria ARM64EC que genera
+Visual Studio al producir los binarios híbridos ARM64X originales.
 
 Los hooks, ventanas, menús COM, GDI, carga de skins y resolución de accesos
 directos siguen en C++. Esta es una migración parcial funcional. No se ha
@@ -81,6 +169,20 @@ La skin externa Fluent-Metro, el perfil XML y las rutas WSCore se conservan;
 los recursos externos del usuario no se incorporan automáticamente al instalador.
 
 ## Correcciones y optimizaciones
+
+- Corregida la inversión vertical de iconos anclados, carpetas y vistas previas
+  al recuperar la caché. `GetObject` puede informar una altura positiva para un
+  DIB creado de arriba abajo; la copia directa anterior interpretaba sus filas
+  al revés. Ahora GDI normaliza una copia propia no seleccionada, conservando
+  los píxeles y el canal alfa. La versión 3 de la caché rechaza automáticamente
+  las bases de versión 2, incluidas las que ya contienen iconos invertidos.
+  El build predeterminado pasa a 4.4.1001 para actualizar la instalación 4.4.1000;
+  el MSI original considera una instalación con la misma versión como existente.
+
+- El exportador `Utility.exe extract` devuelve cero tras completar la exportación;
+  antes devolvía uno incluso al generar correctamente el CSV y detenía el build.
+  Corregidos también un `delete` de array y la liberación de la DLL en un fallo
+  de apertura del segundo archivo de recursos.
 
 - Resultado booleano de `SHGetPathFromIDList` y `SHGetFileInfo` comprobado como
   booleano, sin `SUCCEEDED`.
@@ -113,13 +215,45 @@ los recursos externos del usuario no se incorporan automáticamente al instalado
 - El actualizador exige una firma Authenticode de confianza aunque los metadatos
   no indiquen editor, y lo comprueba si se indica. Rechaza errores HTTP y descargas
   excesivas. Un instalador local sin firma no es aceptado por el actualizador.
+- La comprobación automática semanal de versiones (`Update`) viene desactivada por
+  defecto: el canal de versiones es el de Open-Shell original y podría ofrecer
+  sustituir WinSlim. Puede activarse en la configuración o por directiva; la
+  comprobación manual sigue disponible.
+- La búsqueda vuelve a admitir frases entre comillas (`"visual studio"`), como el
+  `GetToken` original, tanto en el núcleo Rust como en la implementación C++.
+- Al buscar, cada ajuste se compara una sola vez con el texto (antes dos veces en
+  cada refresco del hilo de interfaz).
+- “Explorar” y “Abrir ubicación del archivo” también cierran el menú Win7 superior
+  oculto cuando se usan desde «Todos los programas».
+- La caché se lee con un único búfer de 256 KB y se escribe acumulando en memoria:
+  sin consultas de tamaño/posición por campo ni escrituras pequeñas por elemento.
+  Cada elemento se serializa directamente bajo el bloqueo de lectura, sin copiar
+  `ItemInfo` ni clonar PIDLs, y la escritura a disco ocurre fuera del bloqueo.
+  El formato del archivo (versión 3) no cambia.
+- Un icono que no puede capturarse (por ejemplo, si falla `CopyImage`) se omite
+  de la caché en lugar de cancelar todo el guardado; los elementos que lo usan
+  cargan el icono predeterminado y lo refrescan. Un guardado fallido se reintenta
+  al cabo de un minuto, no en cada cierre del menú.
 
 ## Diagnóstico del primer clic
 
-```powershell
+### Acceso de Microsoft Store en el equipo WinSlim
+
+El acceso `Tienda de aplicaciones.lnk` apuntaba como icono a
+`C:\WSCore\Components\Visuals\icons\icons8-tienda-microsoft-100.ico`, que no
+existe en el equipo. Se ha retirado únicamente esa referencia para que el Shell
+use el icono nativo de Store. El PIDL del destino se ha verificado sin cambios
+y el acceso original está respaldado en `WinSlim Profile/Backups`.
+`tools/Inspect-StoreShortcut.ps1`, `tools/Repair-StoreShortcut.ps1` y
+`tools/Verify-StoreShortcut.py` permiten inspeccionar, preparar/aplicar y verificar
+esa reparación; no se ejecutan como parte del build ni cambian otros accesos.
+
+### Traza de interacción
+
+```bat
 .\tools\interaction-trace.cmd on
-# Reiniciar Open-Shell y reproducir tras iniciar sesión.
-# Registro: %LOCALAPPDATA%\OpenShell\InteractionTrace.log
+REM Reiniciar Open-Shell y reproducir tras iniciar sesión.
+REM Registro: %LOCALAPPDATA%\OpenShell\InteractionTrace.log
 .\tools\interaction-trace.cmd off
 ```
 
@@ -138,8 +272,12 @@ sustituyen esa prueba. No se ignoran indiscriminadamente pérdidas de foco.
 
 Sin compilar:
 
-```powershell
+```bat
 python .\tools\verify.py
+python .\tools\Test-BitmapCache.py
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-Prerequisites.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-BuildLauncher.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-CmdHost.ps1
 rustfmt --edition 2021 --check .\Src\RustCore\src\lib.rs
 ```
 

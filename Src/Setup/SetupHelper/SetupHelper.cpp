@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <atlstr.h>
 #include "ResourceHelper.h"
+#include "../ExplorerShell.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -74,6 +75,8 @@ int FixVersion( void )
 // Usage:
 //   exitSM // exits the start menu if it is running
 //   fixVersion // sets the correct OS version
+//   exitExplorer // WinSlim: stops this session's Explorer before files are replaced
+//   startExplorer // WinSlim: restarts the Explorer stopped by exitExplorer, once
 
 int WINAPI wWinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrCmdLine, int nCmdShow )
 {
@@ -92,6 +95,19 @@ int WINAPI wWinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
 		if (_wcsicmp(params[0],L"fixVersion")==0)
 		{
 			return FixVersion();
+		}
+		if (_wcsicmp(params[0],L"exitExplorer")==0)
+		{
+			// Drop a stale marker first: only a shell stopped right now may be restarted later.
+			ExplorerShell::TakeStoppedMark();
+			if (ExplorerShell::Stop())
+				ExplorerShell::SetStoppedMark();
+			return 0;
+		}
+		if (_wcsicmp(params[0],L"startExplorer")==0)
+		{
+			ExplorerShell::RestartIfStopped();
+			return 0;
 		}
 	}
 	return 1;

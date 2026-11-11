@@ -11,9 +11,21 @@ echo --- MSI Checksums
 
 REM ********* Build bootstrapper
 echo --- Bootstrapper
-for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath`) do set MSBuildDir=%%i\MSBuild\Current\Bin\
+set "MSBuildExe="
+if defined CS_MSBUILD_PATH (
+	if not exist "%CS_MSBUILD_PATH%" (
+		echo MSBuild not found at CS_MSBUILD_PATH: "%CS_MSBUILD_PATH%"
+		exit /b 1
+	)
+	set "MSBuildExe=%CS_MSBUILD_PATH%"
+) else (
+	for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -version "[17.0,18.0)" -requires Microsoft.Component.MSBuild Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "MSBuildExe=%%i\MSBuild\Current\Bin\MSBuild.exe"
+)
+if not defined MSBuildExe exit /b 1
+if not exist "%MSBuildExe%" exit /b 1
+if /i not "%CS_MSBUILD_TARGET%"=="Build" set "CS_MSBUILD_TARGET=Rebuild"
 
-"%MSBuildDir%MSBuild.exe" Setup.sln /m /t:Rebuild /p:Configuration="Release" /p:Platform="Win32" /verbosity:quiet /nologo
+"%MSBuildExe%" Setup.sln /m /t:%CS_MSBUILD_TARGET% /p:Configuration="Release" /p:Platform="Win32" /verbosity:quiet /nologo
 @if ERRORLEVEL 1 exit /b 1
 
 
@@ -139,14 +151,15 @@ if errorlevel 1 exit /b 1
 
 REM ********* Source Index PDBs
 
-set PDBSTR_PATH="C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\srcsrv\pdbstr.exe"
+set "PDBSTR_PATH=%CS_PDBSTR_PATH%"
+if not defined PDBSTR_PATH set "PDBSTR_PATH=C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\srcsrv\pdbstr.exe"
 
-if exist %PDBSTR_PATH% (
+if exist "%PDBSTR_PATH%" (
 	echo --- Adding source index to PDBs
 	call CreateSourceIndex.bat ..\.. > Output\pdbstr.txt
 
 	for %%f in (Output\PDB32\*.pdb) do (
-		%PDBSTR_PATH% -w -p:%%f -s:srcsrv -i:Output\pdbstr.txt
+		"%PDBSTR_PATH%" -w -p:%%f -s:srcsrv -i:Output\pdbstr.txt
 		if ERRORLEVEL 1 (
 			echo Error adding source index to PDB
 			exit /b 1
@@ -154,7 +167,7 @@ if exist %PDBSTR_PATH% (
 	)
 
 	for %%f in (Output\PDB64\*.pdb) do (
-		%PDBSTR_PATH% -w -p:%%f -s:srcsrv -i:Output\pdbstr.txt
+		"%PDBSTR_PATH%" -w -p:%%f -s:srcsrv -i:Output\pdbstr.txt
 		if ERRORLEVEL 1 (
 			echo Error adding source index to PDB
 			exit /b 1
@@ -162,7 +175,7 @@ if exist %PDBSTR_PATH% (
 	)
 
 	for %%f in (Output\PDBARM64\*.pdb) do (
-		%PDBSTR_PATH% -w -p:%%f -s:srcsrv -i:Output\pdbstr.txt
+		"%PDBSTR_PATH%" -w -p:%%f -s:srcsrv -i:Output\pdbstr.txt
 		if ERRORLEVEL 1 (
 			echo Error adding source index to PDB
 			exit /b 1
@@ -172,13 +185,15 @@ if exist %PDBSTR_PATH% (
 
 REM ********* Prepare symbols
 
-set SYMSTORE_PATH="C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\symstore.exe"
+set "SYMSTORE_PATH=%CS_SYMSTORE_PATH%"
+if not defined SYMSTORE_PATH set "SYMSTORE_PATH=C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\symstore.exe"
+if not exist "%SYMSTORE_PATH%" exit /b 1
 
-%SYMSTORE_PATH% add /r /f Output\PDB32 /s Output\symbols /t OpenShell -:NOREFS > nul
+"%SYMSTORE_PATH%" add /r /f Output\PDB32 /s Output\symbols /t OpenShell -:NOREFS > nul
 if errorlevel 1 exit /b 1
-%SYMSTORE_PATH% add /r /f Output\PDB64 /s Output\symbols /t OpenShell -:NOREFS > nul
+"%SYMSTORE_PATH%" add /r /f Output\PDB64 /s Output\symbols /t OpenShell -:NOREFS > nul
 if errorlevel 1 exit /b 1
-%SYMSTORE_PATH% add /r /f Output\PDBARM64 /s Output\symbols /t OpenShell -:NOREFS > nul
+"%SYMSTORE_PATH%" add /r /f Output\PDBARM64 /s Output\symbols /t OpenShell -:NOREFS > nul
 if errorlevel 1 exit /b 1
 rd /Q /S Output\symbols\000Admin > nul
 del Output\symbols\pingme.txt > nul

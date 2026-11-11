@@ -619,6 +619,7 @@ static void WriteDialog( HWND parent, HANDLE csv, int id, HINSTANCE hInstance1, 
 int ExtractStrings( wchar_t *const *params, int count )
 {
 	if (count<3) return 3;
+	AttachConsole(ATTACH_PARENT_PROCESS);
 
 	const wchar_t *dllName1=params[1];
 	const wchar_t *dllName2=NULL;
@@ -644,11 +645,11 @@ int ExtractStrings( wchar_t *const *params, int count )
 		if (!hDLL2)
 		{
 			Printf("Failed to open %S (err: %d)\n",dllName2,GetLastError());
+			FreeLibrary(hDLL1);
 			return 1;
 		}
 	}
 
-	int res=1;
 	CSettingsParser parser;
 	parser.LoadText(L"LocComments.txt");
 	parser.ParseText();
@@ -736,7 +737,7 @@ int ExtractStrings( wchar_t *const *params, int count )
 					if (pBuf[i]=='=')
 						pBuf[i]='\t';
 				WriteFile(hCSV,pBuf,size*2,&q,NULL);
-				delete pBuf;
+				delete[] pBuf;
 			}
 		}
 	}
@@ -746,7 +747,7 @@ int ExtractStrings( wchar_t *const *params, int count )
 	if (hDLL1) FreeLibrary(hDLL1);
 	if (hDLL2) FreeLibrary(hDLL2);
 
-	return res;
+	return 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

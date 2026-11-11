@@ -37,7 +37,12 @@ static bool g_bInvertMetroIcons;
 
 const int MAX_FOLDER_LEVELS=10; // don't go more than 10 levels deep
 const int REFRESH_DELAY=5000;
-const int CACHE_FILE_VERSION=2;
+// Version 2 may contain vertically inverted rows from the old raw DIB snapshot.
+const int CACHE_FILE_VERSION=3;
+const DWORD CACHE_SAVE_INTERVAL=300000; // at least 5 minutes between cache saves
+const DWORD CACHE_RETRY_INTERVAL=60000; // a failed save is retried after 1 minute
+const uint64_t MAX_CACHE_FILE_SIZE=512ull*1024*1024;
+const size_t CACHE_IO_BUFFER=256*1024;
 
 PROPERTYKEY PKEY_MetroIcon={{0x86D40B4D, 0x9069, 0x443C, {0x81, 0x9A, 0x2A, 0x54, 0x09, 0x0D, 0xCC, 0xEC}}, 2};
 
@@ -3127,13 +3132,130 @@ namespace
 	};
 }
 
-static uint64_t CacheBytesRemaining( HANDLE file )
+static bool WriteCacheBytes( HANDLE file, const void *data, size_t bytes )
 {
-	LARGE_INTEGER zero={}, position={}, size={};
-	if (!GetFileSizeEx(file,&size) || size.QuadPart<0 || size.QuadPart>512LL*1024*1024 ||
-		!SetFilePointerEx(file,zero,&position,FILE_CURRENT) || position.QuadPart>size.QuadPart)
-		return 0;
-	return (uint64_t)(size.QuadPart-position.QuadPart);
+	const BYTE *cursor=(const BYTE*)data;
+	while (bytes)
+	{
+		DWORD chunk=bytes>0x40000000?0x40000000:(DWORD)bytes;
+		DWORD written=0;
+		if (!WriteFile(file,cursor,chunk,&written,NULL) || !written) return false;
+		cursor+=written;
+		bytes-=written;
+	}
+	return true;
+}
+
+namespace
+{
+	// Reads the cache through one bounded buffer. The file size is queried once, so
+	// every length is validated against the bytes left without extra system calls.
+	class CacheReader
+	{
+	public:
+		explicit CacheReader( HANDLE file ):m_File(file),m_Pos(0),m_Size(0),m_Remaining(0) {}
+		bool Open( void )
+		{
+			LARGE_INTEGER size={};
+			if (!GetFileSizeEx(m_File,&size) || size.QuadPart<=0 || (uint64_t)size.QuadPart>MAX_CACHE_FILE_SIZE) return false;
+			m_Buffer.resize(CACHE_IO_BUFFER);
+			m_Remaining=(uint64_t)size.QuadPart;
+			return true;
+		}
+		uint64_t Remaining( void ) const { return m_Remaining; }
+		bool Read( void *data, size_t bytes )
+		{
+			if (bytes>m_Remaining) return false;
+			BYTE *out=(BYTE*)data;
+			while (bytes)
+			{
+				if (m_Pos==m_Size)
+				{
+					if (bytes>=m_Buffer.size())
+					{
+						// large blocks go straight to their destination
+						DWORD read=0;
+						if (!ReadFile(m_File,out,(DWORD)bytes,&read,NULL) || read!=bytes) return false;
+						m_Remaining-=bytes;
+						return true;
+					}
+					if (!Fill()) return false;
+				}
+				size_t chunk=m_Size-m_Pos;
+				if (chunk>bytes) chunk=bytes;
+				memcpy(out,m_Buffer.data()+m_Pos,chunk);
+				m_Pos+=chunk;
+				out+=chunk;
+				bytes-=chunk;
+				m_Remaining-=chunk;
+			}
+			return true;
+		}
+		bool Skip( uint64_t bytes )
+		{
+			if (bytes>m_Remaining) return false;
+			uint64_t buffered=m_Size-m_Pos;
+			if (buffered>bytes) buffered=bytes;
+			m_Pos+=(size_t)buffered;
+			m_Remaining-=buffered;
+			bytes-=buffered;
+			if (!bytes) return true;
+			LARGE_INTEGER offset={};
+			offset.QuadPart=(LONGLONG)bytes;
+			if (!SetFilePointerEx(m_File,offset,NULL,FILE_CURRENT)) return false;
+			m_Remaining-=bytes;
+			return true;
+		}
+	private:
+		bool Fill( void )
+		{
+			// only called with an empty buffer, so the logical and physical positions match
+			DWORD wanted=(DWORD)(m_Remaining<m_Buffer.size()?m_Remaining:m_Buffer.size());
+			DWORD read=0;
+			if (!wanted || !ReadFile(m_File,m_Buffer.data(),wanted,&read,NULL) || read!=wanted) return false;
+			m_Pos=0;
+			m_Size=read;
+			return true;
+		}
+		CacheReader( const CacheReader & )=delete;
+		CacheReader &operator=( const CacheReader & )=delete;
+		HANDLE m_File;
+		std::vector<BYTE> m_Buffer;
+		size_t m_Pos, m_Size;
+		uint64_t m_Remaining;
+	};
+
+	// Serializes records in memory. Callers append while holding a cache lock and call
+	// FlushIfFull only after releasing it, so disk I/O never runs under a lock.
+	class CacheWriter
+	{
+	public:
+		explicit CacheWriter( HANDLE file ):m_File(file),m_Total(0) { m_Buffer.reserve(CACHE_IO_BUFFER+64*1024); }
+		bool Append( const void *data, size_t bytes )
+		{
+			if (bytes>MAX_CACHE_FILE_SIZE-m_Total) return false;
+			if (bytes)
+			{
+				const BYTE *source=(const BYTE*)data;
+				m_Buffer.insert(m_Buffer.end(),source,source+bytes);
+			}
+			m_Total+=bytes;
+			return true;
+		}
+		bool FlushIfFull( void ) { return m_Buffer.size()<CACHE_IO_BUFFER || Flush(); }
+		bool Flush( void )
+		{
+			bool ok=WriteCacheBytes(m_File,m_Buffer.data(),m_Buffer.size());
+			m_Buffer.clear();
+			return ok;
+		}
+	private:
+		CacheWriter( const CacheWriter & )=delete;
+		CacheWriter &operator=( const CacheWriter & )=delete;
+		HANDLE m_File;
+		std::vector<BYTE> m_Buffer;
+		uint64_t m_Total;
+	};
 }
 
 static bool CacheLanguageHash( DWORD &hash )
@@ -3146,27 +3268,25 @@ static bool CacheLanguageHash( DWORD &hash )
 	return true;
 }
 
-static DWORD ReadCacheFile( HANDLE file )
+static DWORD ReadCacheFile( CacheReader &reader )
 {
-	DWORD data=0, read=0;
-	return ReadFile(file,&data,sizeof(data),&read,NULL) && read==sizeof(data)?data:0;
+	DWORD data=0;
+	return reader.Read(&data,sizeof(data))?data:0;
 }
 
-static bool ReadCacheFile( HANDLE file, IconData &data )
+static bool ReadCacheFile( CacheReader &reader, IconData &data )
 {
-	DWORD read=0;
-	if (!ReadFile(file,&data,sizeof(data),&read,NULL) || read!=sizeof(data)) return false;
-	uint64_t pathBytes=WinSlimCheckedSpan(data.PATHLen,2,32767,CacheBytesRemaining(file));
+	if (!reader.Read(&data,sizeof(data))) return false;
+	uint64_t pathBytes=WinSlimCheckedSpan(data.PATHLen,2,32767,reader.Remaining());
 	DWORD bitmapBytes=WinSlimBitmapBytes(data.bitmapW,data.bitmapH);
 	return data.sizeType>=0 && data.sizeType<CItemManager::ICON_SIZE_COUNT && bitmapBytes &&
-		pathBytes!=UINT64_MAX && pathBytes+bitmapBytes<=CacheBytesRemaining(file);
+		pathBytes!=UINT64_MAX && pathBytes+bitmapBytes<=reader.Remaining();
 }
 
-static bool ReadCacheFile( HANDLE file, ItemData &data )
+static bool ReadCacheFile( CacheReader &reader, ItemData &data )
 {
-	DWORD read=0;
-	if (!ReadFile(file,&data,sizeof(data),&read,NULL) || read!=sizeof(data)) return false;
-	uint64_t remaining=CacheBytesRemaining(file);
+	if (!reader.Read(&data,sizeof(data))) return false;
+	uint64_t remaining=reader.Remaining();
 	const int lengths[]={data.pathLen,data.PATHLen,data.targetPATHLen,data.appidLen,data.metroNameLen,data.iconPathLen};
 	for (int length:lengths)
 	{
@@ -3185,15 +3305,13 @@ static bool ReadCacheFile( HANDLE file, ItemData &data )
 		!(data.validFlags&~(CItemManager::INFO_DATA|CItemManager::INFO_ICON));
 }
 
-static bool ReadCacheFile( HANDLE file, CAbsolutePidl &data, int size )
+static bool ReadCacheFile( CacheReader &reader, CAbsolutePidl &data, int size )
 {
-	if (WinSlimCheckedSpan(size,1,65536,CacheBytesRemaining(file))==UINT64_MAX) return false;
+	if (WinSlimCheckedSpan(size,1,65536,reader.Remaining())==UINT64_MAX) return false;
 	if (!size) return true;
 	PIDLIST_ABSOLUTE pidl=(PIDLIST_ABSOLUTE)CoTaskMemAlloc(size);
 	if (!pidl) return false;
-	DWORD read=0;
-	if (!ReadFile(file,pidl,size,&read,NULL) || read!=(DWORD)size ||
-		!WinSlimValidatePidl((const unsigned char*)pidl,size))
+	if (!reader.Read(pidl,size) || !WinSlimValidatePidl((const unsigned char*)pidl,size))
 	{
 		ILFree(pidl);
 		return false;
@@ -3202,22 +3320,21 @@ static bool ReadCacheFile( HANDLE file, CAbsolutePidl &data, int size )
 	return true;
 }
 
-static bool ReadCacheFile( HANDLE file, CString &data, int length )
+static bool ReadCacheFile( CacheReader &reader, CString &data, int length )
 {
-	uint64_t bytes=WinSlimCheckedSpan(length,2,32767,CacheBytesRemaining(file));
+	uint64_t bytes=WinSlimCheckedSpan(length,2,32767,reader.Remaining());
 	if (bytes==UINT64_MAX) return false;
 	if (!length) { data.Empty(); return true; }
-	DWORD read=0;
-	bool ok=ReadFile(file,data.GetBuffer(length),(DWORD)bytes,&read,NULL) && read==bytes;
+	bool ok=reader.Read(data.GetBuffer(length),(size_t)bytes);
 	data.ReleaseBuffer(ok?length:0);
 	return ok;
 }
 
-static bool ReadCacheFile( HANDLE file, HDC hdc, HBITMAP &data, int width, int height )
+static bool ReadCacheFile( CacheReader &reader, HDC hdc, HBITMAP &data, int width, int height )
 {
 	data=NULL;
 	DWORD bytes=WinSlimBitmapBytes(width,height);
-	if (!bytes || bytes>CacheBytesRemaining(file)) return false;
+	if (!bytes || bytes>reader.Remaining()) return false;
 	BITMAPINFO bi={};
 	bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
 	bi.bmiHeader.biWidth=width;
@@ -3227,8 +3344,7 @@ static bool ReadCacheFile( HANDLE file, HDC hdc, HBITMAP &data, int width, int h
 	void *bits=NULL;
 	data=CreateDIBSection(hdc,&bi,DIB_RGB_COLORS,&bits,NULL,0);
 	if (!data) return false;
-	DWORD read=0;
-	if (!ReadFile(file,bits,bytes,&read,NULL) || read!=bytes)
+	if (!reader.Read(bits,bytes))
 	{
 		DeleteObject(data);
 		data=NULL;
@@ -3237,51 +3353,33 @@ static bool ReadCacheFile( HANDLE file, HDC hdc, HBITMAP &data, int width, int h
 	return true;
 }
 
-static bool WriteCacheBytes( HANDLE file, const void *data, DWORD bytes )
-{
-	const BYTE *cursor=(const BYTE*)data;
-	while (bytes)
-	{
-		DWORD written=0;
-		if (!WriteFile(file,cursor,bytes,&written,NULL) || !written) return false;
-		cursor+=written;
-		bytes-=written;
-	}
-	return true;
-}
-
-static bool WriteCacheFile( HANDLE file, DWORD data ) { return WriteCacheBytes(file,&data,sizeof(data)); }
-static bool WriteCacheFile( HANDLE file, const IconData &data ) { return WriteCacheBytes(file,&data,sizeof(data)); }
-static bool WriteCacheFile( HANDLE file, const ItemData &data ) { return WriteCacheBytes(file,&data,sizeof(data)); }
-static bool WriteCacheFile( HANDLE file, PIDLIST_ABSOLUTE data, int size ) { return size>=0 && WriteCacheBytes(file,data,size); }
-static bool WriteCacheFile( HANDLE file, const CString &data ) { return WriteCacheBytes(file,(const wchar_t*)data,data.GetLength()*sizeof(wchar_t)); }
+static bool WriteCacheFile( CacheWriter &writer, DWORD data ) { return writer.Append(&data,sizeof(data)); }
+static bool WriteCacheFile( CacheWriter &writer, const IconData &data ) { return writer.Append(&data,sizeof(data)); }
+static bool WriteCacheFile( CacheWriter &writer, const ItemData &data ) { return writer.Append(&data,sizeof(data)); }
+static bool WriteCacheFile( CacheWriter &writer, PIDLIST_ABSOLUTE data, int size ) { return size>=0 && writer.Append(data,(size_t)size); }
+static bool WriteCacheFile( CacheWriter &writer, const CString &data ) { return writer.Append((const wchar_t*)data,data.GetLength()*sizeof(wchar_t)); }
 
 static bool SnapshotCacheBitmap( HDC hdc, HBITMAP bitmap, int width, int height, std::vector<DWORD> &bits )
 {
 	DWORD bytes=WinSlimBitmapBytes(width,height);
 	if (!bytes) return false;
 	bits.resize(bytes/sizeof(DWORD));
-	DIBSECTION source={};
-	if (GetObject(bitmap,sizeof(source),&source)==sizeof(source) && source.dsBm.bmBits &&
-		source.dsBm.bmBitsPixel==32 && source.dsBm.bmWidth==width && source.dsBm.bmHeight==height &&
-		source.dsBm.bmWidthBytes>=width*4)
-	{
-		// Stored WIC icons are DIB sections. Copy their pixels directly, even
-		// when a paint DC currently has the bitmap selected. Cache rows are bottom-up.
-		for (int row=0;row<height;row++)
-		{
-			int sourceRow=source.dsBmih.biHeight<0?height-row-1:row;
-			memcpy(bits.data()+(size_t)row*width,(const BYTE*)source.dsBm.bmBits+(size_t)sourceRow*source.dsBm.bmWidthBytes,width*4);
-		}
-		return true;
-	}
+	// GetObject can report positive biHeight even for a top-down DIB. Its raw
+	// memory therefore cannot tell us the visible row order. Let GDI normalize
+	// to the bottom-up format also used by ReadCacheFile.
+	// Own an unselected copy: the live icon may be selected in a paint DC, which
+	// GetDIBits does not support. Never select or modify the live bitmap here.
+	HBITMAP snapshot=(HBITMAP)CopyImage(bitmap,IMAGE_BITMAP,width,height,LR_CREATEDIBSECTION);
+	if (!snapshot) return false;
 	BITMAPINFO bi={};
 	bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
 	bi.bmiHeader.biWidth=width;
 	bi.bmiHeader.biHeight=height;
 	bi.bmiHeader.biPlanes=1;
 	bi.bmiHeader.biBitCount=32;
-	return GetDIBits(hdc,bitmap,0,height,bits.data(),&bi,DIB_RGB_COLORS)==height;
+	int lines=GetDIBits(hdc,snapshot,0,height,bits.data(),&bi,DIB_RGB_COLORS);
+	DeleteObject(snapshot);
+	return lines==height;
 }
 
 bool CItemManager::CompareModuleTimeStamp( const CString &PATH, const FILETIME &timestamp, std::vector<ModuleInfo> &modules )
@@ -3315,14 +3413,15 @@ void CItemManager::LoadCacheFile( void )
 	wchar_t path[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell\\DataCache.db";
 	DoEnvironmentSubst(path,_MAX_PATH);
 
-	HANDLE file=CreateFile(path,GENERIC_READ,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+	HANDLE file=CreateFile(path,GENERIC_READ,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_SEQUENTIAL_SCAN,NULL);
 	if (file==INVALID_HANDLE_VALUE) return;
-	if (!CacheBytesRemaining(file)) { CloseHandle(file); return; }
 
 	bool bError=true;
 	try
 	{
-		DWORD tag=ReadCacheFile(file);
+		// An empty or oversized file is treated like any other corrupt cache.
+		CacheReader reader(file);
+		DWORD tag=reader.Open()?ReadCacheFile(reader):0;
 		std::vector<ModuleInfo> modules;
 		ModuleInfo stdInfo={L"SHELL32.DLL"};
 		modules.push_back(stdInfo);
@@ -3331,23 +3430,23 @@ void CItemManager::LoadCacheFile( void )
 		m_BlackListInfos10.clear();
 		if (tag=='CLSH')
 		{
-			tag=ReadCacheFile(file);
+			tag=ReadCacheFile(reader);
 			std::vector<const IconInfo*> remapIcons(1);
 			remapIcons[0]=NULL;
 			DWORD build;
-			if (tag==GetVersionEx(g_Instance,&build) && ReadCacheFile(file)==CACHE_FILE_VERSION)
+			if (tag==GetVersionEx(g_Instance,&build) && ReadCacheFile(reader)==CACHE_FILE_VERSION)
 			{
-				int size1=ReadCacheFile(file);
-				int size2=ReadCacheFile(file);
-				int size3=ReadCacheFile(file);
-				int langHash=ReadCacheFile(file);
+				int size1=ReadCacheFile(reader);
+				int size2=ReadCacheFile(reader);
+				int size3=ReadCacheFile(reader);
+				int langHash=ReadCacheFile(reader);
 				bError=false;
-				tag=ReadCacheFile(file);
+				tag=ReadCacheFile(reader);
 				CacheDC hdc;
 				while (tag=='ICON')
 				{
 					IconData data;
-					if (!ReadCacheFile(file,data))
+					if (!ReadCacheFile(reader,data))
 					{
 						bError=true;
 						break;
@@ -3357,14 +3456,14 @@ void CItemManager::LoadCacheFile( void )
 					info.timestamp=data.timestamp;
 					info.bTemp=false;
 					info.bMetro=false;
-					if (!ReadCacheFile(file,info.PATH,data.PATHLen))
+					if (!ReadCacheFile(reader,info.PATH,data.PATHLen))
 					{
 						bError=true;
 						break;
 					}
 					if (size1==SMALL_ICON_SIZE && size2==LARGE_ICON_SIZE && size3==EXTRA_LARGE_ICON_SIZE && CompareModuleTimeStamp(info.PATH,info.timestamp,modules))
 					{
-						if (!ReadCacheFile(file,hdc,info.bitmap,data.bitmapW,data.bitmapH))
+						if (!ReadCacheFile(reader,hdc,info.bitmap,data.bitmapW,data.bitmapH))
 						{
 							bError=true;
 							break;
@@ -3373,12 +3472,10 @@ void CItemManager::LoadCacheFile( void )
 					}
 					else
 					{
-						LARGE_INTEGER skip={};
-						skip.QuadPart=WinSlimBitmapBytes(data.bitmapW,data.bitmapH);
-						if (!SetFilePointerEx(file,skip,NULL,FILE_CURRENT)) { bError=true; break; }
+						if (!reader.Skip(WinSlimBitmapBytes(data.bitmapW,data.bitmapH))) { bError=true; break; }
 						remapIcons.push_back(NULL);
 					}
-					tag=ReadCacheFile(file);
+					tag=ReadCacheFile(reader);
 				}
 				hdc.Close();
 				if (tag!='ITEM')
@@ -3393,7 +3490,7 @@ void CItemManager::LoadCacheFile( void )
 				while (!bError && tag=='ITEM')
 				{
 					ItemData data;
-					if (!ReadCacheFile(file,data))
+					if (!ReadCacheFile(reader,data))
 					{
 						bError=true;
 						break;
@@ -3434,23 +3531,23 @@ void CItemManager::LoadCacheFile( void )
 						info.extraLargeIcon=m_DefaultExtraLargeIcon;
 					}
 
-					bError=bError || !ReadCacheFile(file,info.pidl,data.pidlSize);
-					bError=bError || !ReadCacheFile(file,info.path,data.pathLen);
-					bError=bError || !ReadCacheFile(file,info.PATH,data.PATHLen);
-					bError=bError || !ReadCacheFile(file,info.targetPidl,data.targetPidlSize);
-					bError=bError || !ReadCacheFile(file,info.targetPATH,data.targetPATHLen);
-					bError=bError || !ReadCacheFile(file,info.appid,data.appidLen);
-					bError=bError || !ReadCacheFile(file,info.metroName,data.metroNameLen);
-					bError=bError || !ReadCacheFile(file,info.iconPath,data.iconPathLen);
+					bError=bError || !ReadCacheFile(reader,info.pidl,data.pidlSize);
+					bError=bError || !ReadCacheFile(reader,info.path,data.pathLen);
+					bError=bError || !ReadCacheFile(reader,info.PATH,data.PATHLen);
+					bError=bError || !ReadCacheFile(reader,info.targetPidl,data.targetPidlSize);
+					bError=bError || !ReadCacheFile(reader,info.targetPATH,data.targetPATHLen);
+					bError=bError || !ReadCacheFile(reader,info.appid,data.appidLen);
+					bError=bError || !ReadCacheFile(reader,info.metroName,data.metroNameLen);
+					bError=bError || !ReadCacheFile(reader,info.iconPath,data.iconPathLen);
 
-					tag=ReadCacheFile(file);
+					tag=ReadCacheFile(reader);
 				}
 				if (!bError && tag=='BLAK')
 				{
-					int count=ReadCacheFile(file);
-					bError=WinSlimCheckedSpan(count,4,1000000,CacheBytesRemaining(file))==UINT64_MAX;
-					for (int i=0;!bError && i<count;i++) m_BlackListInfos10.insert(ReadCacheFile(file));
-					bError=bError || CacheBytesRemaining(file)!=0;
+					int count=ReadCacheFile(reader);
+					bError=WinSlimCheckedSpan(count,4,1000000,reader.Remaining())==UINT64_MAX;
+					for (int i=0;!bError && i<count;i++) m_BlackListInfos10.insert(ReadCacheFile(reader));
+					bError=bError || reader.Remaining()!=0;
 				}
 				else
 					bError=true;
@@ -3497,12 +3594,13 @@ DWORD CItemManager::SaveCacheFileImpl( void *param )
 	Strcat(path,_countof(path),L"\\DataCache.tmp");
 	CacheHandle file(CreateFile(path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL));
 	if (file==INVALID_HANDLE_VALUE) return 1;
+	CacheWriter writer(file);
 	DWORD languageHash=0;
 	bool ok=CacheLanguageHash(languageHash) &&
-		WriteCacheFile(file,'CLSH') && WriteCacheFile(file,GetVersionEx(g_Instance)) &&
-		WriteCacheFile(file,CACHE_FILE_VERSION) && WriteCacheFile(file,SMALL_ICON_SIZE) &&
-		WriteCacheFile(file,LARGE_ICON_SIZE) && WriteCacheFile(file,EXTRA_LARGE_ICON_SIZE) &&
-		WriteCacheFile(file,languageHash);
+		WriteCacheFile(writer,'CLSH') && WriteCacheFile(writer,GetVersionEx(g_Instance)) &&
+		WriteCacheFile(writer,CACHE_FILE_VERSION) && WriteCacheFile(writer,SMALL_ICON_SIZE) &&
+		WriteCacheFile(writer,LARGE_ICON_SIZE) && WriteCacheFile(writer,EXTRA_LARGE_ICON_SIZE) &&
+		WriteCacheFile(writer,languageHash);
 
 	std::vector<const std::pair<const unsigned int,IconInfo>*> iconInfos;
 	{
@@ -3522,15 +3620,15 @@ DWORD CItemManager::SaveCacheFileImpl( void *param )
 		blackList.assign(pThis->m_BlackListInfos10.begin(),pThis->m_BlackListInfos10.end());
 	}
 	CacheDC hdc;
-	if (!hdc) ok=false;
 	std::map<const IconInfo*,int> remapIcons;
 	int iconIndex=1;
+	std::vector<DWORD> pixels; // reused by every icon
 	for (const auto *entry:iconInfos)
 	{
 		if (!ok || pThis->m_bCacheDisabled.load()) break;
 		IconData data={};
 		CString sourcePath;
-		std::vector<DWORD> pixels;
+		bool captured=false;
 		{
 			// Copy pixels and metadata, then release the lock before any disk I/O.
 			RWLock lock(pThis,false,RWLOCK_ICONS);
@@ -3542,15 +3640,17 @@ DWORD CItemManager::SaveCacheFileImpl( void *param )
 			sourcePath=icon.PATH;
 			data.PATHLen=sourcePath.GetLength();
 			BITMAP bitmap={};
-			ok=GetObject(icon.bitmap,sizeof(bitmap),&bitmap)!=0;
+			captured=hdc && icon.bitmap && GetObject(icon.bitmap,sizeof(bitmap),&bitmap)!=0;
 			data.bitmapW=bitmap.bmWidth;
 			data.bitmapH=bitmap.bmHeight;
-			ok=ok && SnapshotCacheBitmap(hdc,icon.bitmap,data.bitmapW,data.bitmapH,pixels);
+			captured=captured && SnapshotCacheBitmap(hdc,icon.bitmap,data.bitmapW,data.bitmapH,pixels);
 		}
-		if (!ok) break;
+		// An icon that cannot be captured is only left out: items that use it load the
+		// default icon and refresh it. It must never discard the whole cache.
+		if (!captured) continue;
 		remapIcons[&entry->second]=iconIndex++;
-		ok=WriteCacheFile(file,'ICON') && WriteCacheFile(file,data) && WriteCacheFile(file,sourcePath) &&
-			WriteCacheBytes(file,pixels.data(),(DWORD)(pixels.size()*sizeof(DWORD)));
+		ok=WriteCacheFile(writer,'ICON') && WriteCacheFile(writer,data) && WriteCacheFile(writer,sourcePath) &&
+			writer.Append(pixels.data(),pixels.size()*sizeof(DWORD)) && writer.FlushIfFull();
 	}
 	hdc.Close();
 
@@ -3570,57 +3670,56 @@ DWORD CItemManager::SaveCacheFileImpl( void *param )
 	for (const auto *entry:itemInfos)
 	{
 		if (!ok || pThis->m_bCacheDisabled.load()) break;
-		ItemInfo info;
-		unsigned int key;
 		{
+			// Serialize straight from the live entry into memory while holding the read
+			// lock: no ItemInfo/PIDL copies and no disk I/O happen under the lock.
 			RWLock lock(pThis,false,RWLOCK_ITEMS);
-			if (entry->second.bTemp || entry->second.path.IsEmpty()) continue;
-			info=entry->second;
-			key=entry->first;
+			const ItemInfo &info=entry->second;
+			if (info.bTemp || info.path.IsEmpty()) continue;
+			const CAbsolutePidl &pidl=info.GetLatestPidl();
+			ItemData data={};
+			data.key=entry->first;
+			data.writestamp=info.writestamp;
+			data.createstamp=info.createstamp;
+			data.bIconOnly=info.bIconOnly;
+			data.bLink=info.bLink;
+			data.bMetroLink=info.bMetroLink;
+			data.bProtectedLink=info.bProtectedLink;
+			data.bNoPin=info.bNoPin;
+			data.bNoNew=info.bNoNew;
+			data.bExplicitAppId=info.bExplicitAppId;
+			data.pidlSize=pidl?ILGetSize(pidl):0;
+			data.pathLen=info.path.GetLength();
+			data.PATHLen=info.PATH.GetLength();
+			auto remap=[&](const IconInfo *icon) -> int
+			{
+				auto it=remapIcons.find(icon);
+				return it==remapIcons.end()?0:it->second;
+			};
+			data.smallIcon=remap(info.smallIcon);
+			data.largeIcon=remap(info.largeIcon);
+			data.extraLargeIcon=remap(info.extraLargeIcon);
+			data.validFlags=info.validFlags;
+			data.targetPidlSize=info.targetPidl?ILGetSize(info.targetPidl):0;
+			data.targetPATHLen=info.targetPATH.GetLength();
+			data.appidLen=info.appid.GetLength();
+			data.metroNameLen=info.metroName.GetLength();
+			data.iconPathLen=info.iconPath.GetLength();
+			data.iconColor=info.iconColor;
+			data.iconIndex=info.iconIndex;
+			ok=WriteCacheFile(writer,'ITEM') && WriteCacheFile(writer,data) && WriteCacheFile(writer,pidl,data.pidlSize) &&
+				WriteCacheFile(writer,info.path) && WriteCacheFile(writer,info.PATH) && WriteCacheFile(writer,info.targetPidl,data.targetPidlSize) &&
+				WriteCacheFile(writer,info.targetPATH) && WriteCacheFile(writer,info.appid) && WriteCacheFile(writer,info.metroName) && WriteCacheFile(writer,info.iconPath);
 		}
-		// CString and PIDLs in this snapshot own their storage. Pointer identity
-		// is used only for the remap; no live cache entry is dereferenced here.
-		const CAbsolutePidl &pidl=info.newPidl?info.newPidl:info.pidl;
-		ItemData data={};
-		data.key=key;
-		data.writestamp=info.writestamp;
-		data.createstamp=info.createstamp;
-		data.bIconOnly=info.bIconOnly;
-		data.bLink=info.bLink;
-		data.bMetroLink=info.bMetroLink;
-		data.bProtectedLink=info.bProtectedLink;
-		data.bNoPin=info.bNoPin;
-		data.bNoNew=info.bNoNew;
-		data.bExplicitAppId=info.bExplicitAppId;
-		data.pidlSize=pidl?ILGetSize(pidl):0;
-		data.pathLen=info.path.GetLength();
-		data.PATHLen=info.PATH.GetLength();
-		auto remap=[&](const IconInfo *icon) -> int
-		{
-			auto it=remapIcons.find(icon);
-			return it==remapIcons.end()?0:it->second;
-		};
-		data.smallIcon=remap(info.smallIcon);
-		data.largeIcon=remap(info.largeIcon);
-		data.extraLargeIcon=remap(info.extraLargeIcon);
-		data.validFlags=info.validFlags;
-		data.targetPidlSize=info.targetPidl?ILGetSize(info.targetPidl):0;
-		data.targetPATHLen=info.targetPATH.GetLength();
-		data.appidLen=info.appid.GetLength();
-		data.metroNameLen=info.metroName.GetLength();
-		data.iconPathLen=info.iconPath.GetLength();
-		data.iconColor=info.iconColor;
-		data.iconIndex=info.iconIndex;
-		ok=WriteCacheFile(file,'ITEM') && WriteCacheFile(file,data) && WriteCacheFile(file,pidl,data.pidlSize) &&
-			WriteCacheFile(file,info.path) && WriteCacheFile(file,info.PATH) && WriteCacheFile(file,info.targetPidl,data.targetPidlSize) &&
-			WriteCacheFile(file,info.targetPATH) && WriteCacheFile(file,info.appid) && WriteCacheFile(file,info.metroName) && WriteCacheFile(file,info.iconPath);
-		if (log) fwprintf(log.get(),L"0x%08X - %s\r\n",key,(const wchar_t*)info.PATH);
+		// PATH never changes after the item is created, so it can be logged without the lock.
+		if (log) fwprintf(log.get(),L"0x%08X - %s\r\n",entry->first,(const wchar_t*)entry->second.PATH);
+		ok=ok && writer.FlushIfFull();
 	}
 	log.reset();
-	ok=ok && WriteCacheFile(file,'BLAK') && WriteCacheFile(file,(DWORD)blackList.size());
-	for (unsigned int hash:blackList) ok=ok && WriteCacheFile(file,hash);
-	LARGE_INTEGER fileSize={};
-	ok=ok && GetFileSizeEx(file,&fileSize) && fileSize.QuadPart<=512LL*1024*1024 && FlushFileBuffers(file);
+	ok=ok && WriteCacheFile(writer,'BLAK') && WriteCacheFile(writer,(DWORD)blackList.size()) &&
+		writer.Append(blackList.data(),blackList.size()*sizeof(unsigned int));
+	// The writer refuses to grow past MAX_CACHE_FILE_SIZE, matching the reader's limit.
+	ok=ok && writer.Flush() && FlushFileBuffers(file);
 	file.Close();
 	wchar_t path2[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell\\DataCache.db";
 	DoEnvironmentSubst(path2,_MAX_PATH);
@@ -3641,11 +3740,18 @@ void CItemManager::SaveCacheFile( void )
 	{
 		if (WaitForSingleObject(m_SaveCacheThread,0)==WAIT_TIMEOUT) return;
 		DWORD result=0;
-		if (!GetExitCodeThread(m_SaveCacheThread,&result) || result!=0) m_LastCacheSave=0;
+		bool failed=!GetExitCodeThread(m_SaveCacheThread,&result) || result!=0;
 		CloseHandle(m_SaveCacheThread);
 		m_SaveCacheThread=NULL;
+		// Retry a failed save after one minute instead of five, but never on every
+		// menu close: a persistent disk error must not repeat a full snapshot each time.
+		if (failed && m_LastCacheSave)
+		{
+			m_LastCacheSave-=CACHE_SAVE_INTERVAL-CACHE_RETRY_INTERVAL;
+			if (!m_LastCacheSave) m_LastCacheSave=1;
+		}
 	}
-	if (m_LastCacheSave && (DWORD)(time-m_LastCacheSave)<300000) return;
+	if (m_LastCacheSave && (DWORD)(time-m_LastCacheSave)<CACHE_SAVE_INTERVAL) return;
 	// Logging must never switch cache writes back onto Explorer's UI thread.
 	m_bCacheDebug.store((g_LogCategories&LOG_CACHE)!=0);
 	m_SaveCacheThread=CreateThread(NULL,0,SaveCacheFileThread,this,0,NULL);

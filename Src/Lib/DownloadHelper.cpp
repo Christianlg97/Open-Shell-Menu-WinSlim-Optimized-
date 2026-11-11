@@ -478,8 +478,10 @@ DWORD CheckForNewVersion( HWND owner, TSettingsComponent component, TVersionChec
 			CRegKey regSettings, regSettingsUser, regPolicy, regPolicyUser;
 			bool bUpgrade=OpenSettingsKeys(COMPONENT_SHARED,regSettings,regSettingsUser,regPolicy,regPolicyUser);
 
+			// WinSlim is a fork: the release feed below is upstream Open-Shell, so weekly
+			// automatic checks are off unless the user or a policy enables them.
 			CSetting settings[]={
-				{L"Update",CSetting::TYPE_BOOL,0,0,1},
+				{L"Update",CSetting::TYPE_BOOL,0,0,0},
 				{L"Nightly",CSetting::TYPE_BOOL,0,0,0},
 				{NULL}
 			};

@@ -4,16 +4,20 @@
     <!-- The original scripts retain the legacy Windows 7/8 C++ build. The new
          WinSlim build explicitly enables Rust and targets Windows 10/11. -->
     <WinSlimUseRustCore Condition="'$(WinSlimUseRustCore)'==''">false</WinSlimUseRustCore>
+    <!-- ARM64X triggers a separate ARM64EC evaluation of projects and their
+         references. That half uses the C++ implementation of the same ABI. -->
+    <WinSlimRustCoreEnabled>false</WinSlimRustCoreEnabled>
+    <WinSlimRustCoreEnabled Condition="'$(WinSlimUseRustCore)'=='true' And '$(Platform)'!='ARM64EC'">true</WinSlimRustCoreEnabled>
     <WinSlimRustTarget Condition="'$(Platform)'=='Win32'">i686-pc-windows-msvc</WinSlimRustTarget>
     <WinSlimRustTarget Condition="'$(Platform)'=='x64'">x86_64-pc-windows-msvc</WinSlimRustTarget>
     <WinSlimRustTarget Condition="'$(Platform)'=='ARM64'">aarch64-pc-windows-msvc</WinSlimRustTarget>
     <WinSlimRustRoot>$(MSBuildThisFileDirectory)</WinSlimRustRoot>
     <WinSlimRustOutput>$(MSBuildThisFileDirectory)..\..\build\rust\</WinSlimRustOutput>
   </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(WinSlimUseRustCore)'=='true'">
+  <ItemDefinitionGroup Condition="'$(WinSlimRustCoreEnabled)'=='true'">
     <ClCompile><PreprocessorDefinitions>WINSLIM_USE_RUST;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
   </ItemDefinitionGroup>
-  <Target Name="BuildWinSlimRustCore" BeforeTargets="ClCompile" Condition="'$(MSBuildProjectName)'=='Lib' And '$(WinSlimUseRustCore)'=='true'">
+  <Target Name="BuildWinSlimRustCore" BeforeTargets="ClCompile" Condition="'$(MSBuildProjectName)'=='Lib' And '$(WinSlimRustCoreEnabled)'=='true'">
     <Error Condition="'$(WinSlimRustTarget)'==''" Text="Unsupported Rust platform: $(Platform)" />
     <Exec Command="cargo rustc --locked --manifest-path &quot;$(WinSlimRustRoot)Cargo.toml&quot; --target-dir &quot;$(WinSlimRustOutput).&quot; --target $(WinSlimRustTarget) --release --lib -- -C target-feature=+crt-static" />
   </Target>

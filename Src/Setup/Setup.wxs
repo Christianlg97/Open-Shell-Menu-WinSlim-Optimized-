@@ -689,6 +689,14 @@
 		</Property>
 		<CustomAction Id="LaunchStartMenu" Impersonate="yes" ExeCommand="" FileKey="StartMenu.exe" Return="asyncNoWait" />
 		<CustomAction Id="CloseStartMenu" Impersonate="yes" BinaryKey="SetupHelper.exe" Return="ignore" ExeCommand="exitSM" />
+		<!-- WinSlim: stop this session's Explorer before files are validated and replaced, and
+		     restart it (unelevated) afterwards, like "taskkill /f /im explorer.exe & start explorer.exe".
+		     RESTARTEXPLORER=0 on the msiexec command line disables it. startExplorer only acts
+		     once, and only if exitExplorer stopped a running shell. -->
+		<Property Id="RESTARTEXPLORER" Value="1" Secure="yes" />
+		<CustomAction Id="StopExplorer" Impersonate="yes" BinaryKey="SetupHelper.exe" Return="ignore" ExeCommand="exitExplorer" />
+		<CustomAction Id="StartExplorer" Impersonate="yes" BinaryKey="SetupHelper.exe" Return="ignore" ExeCommand="startExplorer" />
+		<CustomAction Id="StartExplorerRollback" Impersonate="yes" Execute="rollback" BinaryKey="SetupHelper.exe" Return="ignore" ExeCommand="startExplorer" />
 		<WixVariable Id="WixUIBannerBmp" Value="..\Setup\banner.jpg" />
 		<WixVariable Id="WixUIDialogBmp" Value="..\Setup\dialog.jpg" />
 		<Upgrade Id="$(var.CS_UPGRADE)">
@@ -697,8 +705,12 @@
 		</Upgrade>
 		<InstallExecuteSequence>
 			<RemoveExistingProducts After="InstallInitialize" />
-			<Custom Action="CloseStartMenu" Before="InstallValidate"><![CDATA[((!StartMenu=3) AND (&StartMenu=2)) OR PREVIOUSVERSIONSINSTALLED OR REINSTALL]]></Custom>
-			<Custom Action="LaunchStartMenu" After="InstallFinalize"><![CDATA[(!StartMenu=3 OR &StartMenu=3) AND NOT REMOVE AND NOSTART<>1]]></Custom>
+			<Custom Action="CloseStartMenu" Before="StopExplorer"><![CDATA[((!StartMenu=3) AND (&StartMenu=2)) OR PREVIOUSVERSIONSINSTALLED OR REINSTALL]]></Custom>
+			<!-- The nested uninstall of an upgraded version (UPGRADINGPRODUCTCODE) never touches Explorer. -->
+			<Custom Action="StopExplorer" Before="InstallValidate"><![CDATA[RESTARTEXPLORER="1" AND NOT UPGRADINGPRODUCTCODE AND (NOT Installed OR REINSTALL OR REMOVE)]]></Custom>
+			<Custom Action="StartExplorerRollback" After="RemoveExistingProducts"><![CDATA[RESTARTEXPLORER="1" AND NOT UPGRADINGPRODUCTCODE]]></Custom>
+			<Custom Action="StartExplorer" After="InstallFinalize"><![CDATA[RESTARTEXPLORER="1" AND NOT UPGRADINGPRODUCTCODE]]></Custom>
+			<Custom Action="LaunchStartMenu" After="StartExplorer"><![CDATA[(!StartMenu=3 OR &StartMenu=3) AND NOT REMOVE AND NOSTART<>1]]></Custom>
 		</InstallExecuteSequence>
 		<Binary Id="SetupHelper.exe" SourceFile="Output\SetupHelper.exe" />
 		<Binary Id="dialog2.jpg" SourceFile="..\Setup\dialog2.jpg" />

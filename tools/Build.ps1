@@ -1,80 +1,64 @@
 param(
-    [string]$Version = '4.4.1000',
+    [string]$Version = '4.4.1001',
     [ValidateSet('English','Spanish','French','German','Italian','Polish','Russian','ChineseCN','ChineseTW')]
     [string]$Language = 'English',
     [switch]$Full,
     [switch]$MsiOnly,
     [switch]$Legacy,
     [switch]$CheckOnly,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$NoInstall,
+    [switch]$InstallOnly,
+    [switch]$Incremental,
+    [string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $setup = Join-Path $repository 'Src\Setup'
 try {
+    if (-not $OutputDirectory) {
+        $workspace=Split-Path $repository -Parent
+        $releaseRoot=if (Test-Path -LiteralPath (Join-Path $workspace 'build.cmd')) { $workspace } else { $repository }
+        $OutputDirectory=Join-Path $releaseRoot 'Release'
+    }
+    $OutputDirectory=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
+    Write-Host "Carpeta de resultados: $OutputDirectory"
     if ($Full -and $MsiOnly) { throw '-Full and -MsiOnly cannot be combined.' }
     $buildFull = $Full -or -not $MsiOnly
     if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?$') { throw 'Version must be X.Y.Z, optionally followed by -suffix.' }
     $numeric = [version]($Version.Split('-')[0])
     if ($numeric.Major -gt 255 -or $numeric.Minor -gt 255 -or $numeric.Build -gt 65535) { throw 'Version exceeds MSI limits (255.255.65535).' }
-    $missing = [Collections.Generic.List[string]]::new()
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (-not (Test-Path -LiteralPath $vswhere)) { $missing.Add('Visual Studio 2022 with Desktop C++, ATL and a Windows SDK') }
-    else {
-        $installation = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
-        if (-not $installation -or -not (Test-Path -LiteralPath (Join-Path $installation 'MSBuild\Current\Bin\MSBuild.exe'))) {
-            $missing.Add('Visual Studio MSBuild and the C++ workload')
-        }
-        elseif (-not (Test-Path -LiteralPath (Join-Path $installation 'VC\Tools\MSVC'))) {
-            $missing.Add('Visual Studio Desktop development with C++')
-        }
-        else {
-            $compiler=Get-ChildItem -LiteralPath (Join-Path $installation 'VC\Tools\MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1
-            if (-not $compiler -or -not (Test-Path -LiteralPath (Join-Path $compiler.FullName 'atlmfc\include\atlbase.h'))) {
-                $missing.Add('Visual C++ ATL support')
-            }
-            if ($buildFull -and (-not $compiler -or -not (Test-Path -LiteralPath (Join-Path $compiler.FullName 'lib\arm64')))) {
-                $missing.Add('Visual C++ ARM64 build tools')
-            }
-            if ($buildFull -and $compiler -and (-not (Test-Path -LiteralPath (Join-Path $compiler.FullName 'atlmfc\lib\arm64')))) {
-                $missing.Add('Visual C++ ATL for ARM64')
-            }
-        }
-    }
-    $directories = @(
-        'C:\Program Files (x86)\HTML Help Workshop',
-        'C:\Program Files (x86)\WiX Toolset v3.14\bin',
-        'C:\Program Files\7-Zip',
-        (Join-Path $env:USERPROFILE '.cargo\bin')
-    )
-    if ($env:WIX) { $directories += (Join-Path $env:WIX 'bin') }
-    $directories += Get-ChildItem -LiteralPath ${env:ProgramFiles(x86)} -Directory -Filter 'WiX Toolset v3*' -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'bin' }
-    $env:PATH = ($directories -join ';') + ';' + $env:PATH
-    $commands = @('candle.exe','light.exe','hhc.exe','tar.exe')
-    if (-not $Legacy) { $commands += @('cargo.exe','rustc.exe','rustup.exe') }
-    if (-not $SkipTests) { $commands += 'python.exe' }
-    if ($buildFull) {
-        $commands += '7z.exe'
-        $symstore=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers\x64\symstore.exe'
-        if (-not (Test-Path -LiteralPath $symstore)) { $missing.Add('Windows SDK Debugging Tools (x64 symstore.exe)') }
-    }
-    foreach ($command in $commands) {
-        if (-not (Get-Command $command -ErrorAction SilentlyContinue)) { $missing.Add($command) }
-    }
-    if ($missing.Count) { throw ('Missing prerequisites: ' + ($missing -join ', ')) }
-    if ($CheckOnly) { Write-Host 'Build prerequisites found. No compilation was started.'; exit 0 }
+    . (Join-Path $PSScriptRoot 'Prerequisites.ps1')
+    if ($CheckOnly -and $InstallOnly) { throw '-CheckOnly and -InstallOnly cannot be combined.' }
+    $prerequisites=Ensure-WinSlimPrerequisites -Full $buildFull -Legacy ([bool]$Legacy) -SkipTests ([bool]$SkipTests) -CheckOnly ([bool]$CheckOnly) -NoInstall ([bool]$NoInstall)
+    if ($CheckOnly -or $InstallOnly) { Write-Host 'Build prerequisites found. No compilation was started.'; exit 0 }
+    $installation=$prerequisites.Installation
+    $env:CS_MSBUILD_PATH=$prerequisites.MSBuild
+    $env:CS_SYMSTORE_PATH=$prerequisites.Symstore
+    $env:CS_PDBSTR_PATH=$prerequisites.Pdbstr
 
     $env:CS_VERSION = $Version
     $env:CS_BUILD_ARM64 = if ($buildFull) { '1' } else { '0' }
+    # Rebuild stays the default for distributable output. -Incremental reuses
+    # up-to-date objects for local iterations; MSBuild still tracks changed flags.
+    $msbuildTarget = if ($Incremental) { 'Build' } else { 'Rebuild' }
+    $env:CS_MSBUILD_TARGET = $msbuildTarget
     $env:WinSlimUseRustCore = if ($Legacy) { 'false' } else { 'true' }
     if ($Legacy) { Remove-Item Env:CS_WINSLIM_RUST -ErrorAction SilentlyContinue }
     else { $env:CS_WINSLIM_RUST = '1' }
     if (-not $Legacy) {
         $targets = @('x86_64-pc-windows-msvc','i686-pc-windows-msvc')
         if ($buildFull) { $targets += 'aarch64-pc-windows-msvc' }
-        & rustup target add @targets
-        if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the Rust targets.' }
+        if ($NoInstall) {
+            $installedTargets=@(& rustup target list --installed)
+            if ($LASTEXITCODE -ne 0 -or @($targets | Where-Object { $_ -notin $installedTargets }).Count) {
+                throw 'Required Rust targets are missing. Run build.cmd without -NoInstall to prepare them.'
+            }
+        } else {
+            & rustup target add @targets
+            if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the Rust targets.' }
+        }
         if (-not $SkipTests) {
             foreach ($target in @('x86_64-pc-windows-msvc','i686-pc-windows-msvc')) {
                 & cargo test --locked --manifest-path (Join-Path $repository 'Src\RustCore\Cargo.toml') --target-dir (Join-Path $repository 'build\rust-tests') --target $target
@@ -83,10 +67,15 @@ try {
         }
     }
     if (-not $SkipTests) {
+        & (Join-Path $PSScriptRoot 'Test-Prerequisites.ps1') 6>$null
+        & (Join-Path $PSScriptRoot 'Test-BuildLauncher.ps1') 6>$null
+        & (Join-Path $PSScriptRoot 'Test-CmdHost.ps1') 6>$null
         $python = Get-Command python.exe -ErrorAction SilentlyContinue
         if (-not $python) { throw 'Python 3 is required for the static and native regression checks; install it or explicitly use -SkipTests.' }
         & $python.Source (Join-Path $PSScriptRoot 'verify.py')
         if ($LASTEXITCODE -ne 0) { throw 'Regression checks failed.' }
+        & $python.Source (Join-Path $PSScriptRoot 'Test-BitmapCache.py')
+        if ($LASTEXITCODE -ne 0) { throw 'Bitmap cache orientation regression failed.' }
     }
     function Invoke-SetupScript([string]$Name) {
         Push-Location $setup
@@ -99,13 +88,28 @@ try {
     if (-not $SkipTests) {
         $msbuild=Join-Path $installation 'MSBuild\Current\Bin\MSBuild.exe'
         foreach ($platform in @('x64','Win32')) {
-            & $msbuild (Join-Path $PSScriptRoot 'CoreTests.vcxproj') /t:Rebuild /p:Configuration=Release "/p:Platform=$platform" /nologo /verbosity:minimal
+            & $msbuild (Join-Path $PSScriptRoot 'CoreTests.vcxproj') "/t:$msbuildTarget" /p:Configuration=Release "/p:Platform=$platform" /nologo /verbosity:minimal
             if ($LASTEXITCODE -ne 0) { throw "Native core ABI test build failed for $platform" }
             & (Join-Path $repository "build\tests\$platform\CoreTests.exe")
             if ($LASTEXITCODE -ne 0) { throw "Native core ABI regression failed for $platform" }
         }
     }
-    Invoke-SetupScript ('_Build' + $Language + '.bat')
+    function Reset-WinSlimMsiIntegrity {
+        # light.exe running elevated labels its MSI databases High (no write-up). A later
+        # build with the normal token could not delete them, so lower them to Medium.
+        $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { return }
+        foreach ($folder in 'Temp','Final') {
+            $path=Join-Path $setup $folder
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            foreach ($msi in Get-ChildItem -LiteralPath $path -Filter '*.msi' -File -ErrorAction SilentlyContinue) {
+                $null=& icacls.exe $msi.FullName /setintegritylevel M /Q
+                if ($LASTEXITCODE -ne 0) { Write-Warning "No se pudo bajar la etiqueta de integridad de $($msi.FullName)" }
+            }
+        }
+    }
+    try { Invoke-SetupScript ('_Build' + $Language + '.bat') }
+    finally { Reset-WinSlimMsiIntegrity }
     if ($buildFull) { Invoke-SetupScript 'BuildArchives.bat' }
     $final = Join-Path $setup 'Final'
     New-Item -ItemType Directory -Path $final -Force | Out-Null
@@ -129,12 +133,23 @@ try {
             $produced.Add($artifactPath)
         }
     }
-    $hashes = $produced |
-        Get-FileHash -Algorithm SHA256 | ForEach-Object { '{0}  {1}' -f $_.Hash, [IO.Path]::GetFileName($_.Path) }
-    $hashes | Set-Content -LiteralPath (Join-Path $final "SHA256_${versionName}.txt") -Encoding ASCII
-    Write-Host "Done. Installers are in $final"
+    # Windows PowerShell 5.1 does not bind plain strings from the pipeline to Get-FileHash, so pass the paths explicitly.
+    $hashes = @(Get-FileHash -LiteralPath $produced.ToArray() -Algorithm SHA256 -ErrorAction Stop |
+        ForEach-Object { '{0}  {1}' -f $_.Hash, [IO.Path]::GetFileName($_.Path) })
+    if ($hashes.Count -ne $produced.Count) { throw "SHA256 generation failed: $($hashes.Count) of $($produced.Count) artifacts hashed" }
+    $hashFile=Join-Path $final "SHA256_${versionName}.txt"
+    Set-Content -LiteralPath $hashFile -Value $hashes -Encoding ASCII
+    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    foreach ($artifact in @($produced.ToArray())+@($hashFile)) {
+        $destination=Join-Path $OutputDirectory ([IO.Path]::GetFileName($artifact))
+        if (-not [string]::Equals([IO.Path]::GetFullPath($artifact),[IO.Path]::GetFullPath($destination),[StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $artifact -Destination $destination -Force
+        }
+        Write-Host "Resultado: $destination"
+    }
+    Write-Host "Build completado. Resultados en $OutputDirectory"
     exit 0
 } catch {
-    Write-Error $_ -ErrorAction Continue
+    Write-Host ('ERROR: '+$_.Exception.Message) -ForegroundColor Red
     exit 1
 }

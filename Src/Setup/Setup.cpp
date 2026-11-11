@@ -11,6 +11,7 @@
 #include "resource.h"
 #include "StringUtils.h"
 #include "FNVHash.h"
+#include "ExplorerShell.h"
 
 // Setup.exe is a bootstrap application that contains installers for x86, x64 and ARM64.
 // It unpacks the right installer into the temp directory and executes it.
@@ -49,46 +50,19 @@ struct Chunk
 
 static bool IsExplorerShellRunning( void )
 {
-	HWND shellWindow=GetShellWindow();
-	if (!shellWindow)
-		return false;
-
-	DWORD shellProcessId=0;
-	GetWindowThreadProcessId(shellWindow,&shellProcessId);
-	if (!shellProcessId)
-		return false;
-
-	DWORD currentSession=0;
-	DWORD shellSession=0;
-	if (!ProcessIdToSessionId(GetCurrentProcessId(),&currentSession) ||
-		!ProcessIdToSessionId(shellProcessId,&shellSession) ||
-		currentSession!=shellSession)
-	{
-		return false;
-	}
-
-	HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,shellProcessId);
-	if (!process)
-		return false;
-
-	wchar_t path[_MAX_PATH];
-	DWORD pathSize=_countof(path);
-	bool isExplorer=false;
-	if (QueryFullProcessImageName(process,0,path,&pathSize))
-		isExplorer=_wcsicmp(PathFindFileName(path),L"explorer.exe")==0;
-
-	CloseHandle(process);
-	return isExplorer;
+	return ExplorerShell::IsShellRunning();
 }
 
 static void RestoreExplorerShellIfNeeded( bool wasRunning )
 {
+	// The MSI restarts the shell it stopped itself; drop its marker whatever happened.
+	ExplorerShell::TakeStoppedMark();
 	if (!wasRunning)
 		return;
 
-	// Restart Manager normally brings Explorer back before msiexec exits.
-	// Give it a short grace period before applying our fallback so we don't
-	// race a normal restart or create an extra Explorer process.
+	// The MSI custom action (or Restart Manager) normally brings Explorer back before
+	// msiexec exits. Give it a short grace period before applying our fallback so we
+	// don't race a normal restart or create an extra Explorer process.
 	for (int i=0;i<50;i++)
 	{
 		if (IsExplorerShellRunning())
@@ -96,18 +70,8 @@ static void RestoreExplorerShellIfNeeded( bool wasRunning )
 		Sleep(100);
 	}
 
-	wchar_t explorerPath[_MAX_PATH];
-	UINT len=GetWindowsDirectory(explorerPath,_countof(explorerPath));
-	if (!len || len>=_countof(explorerPath) || !PathAppend(explorerPath,L"explorer.exe"))
-		return;
-
-	STARTUPINFO startupInfo={sizeof(startupInfo)};
-	PROCESS_INFORMATION processInfo={};
-	if (CreateProcess(explorerPath,NULL,NULL,NULL,FALSE,0,NULL,NULL,&startupInfo,&processInfo))
-	{
-		CloseHandle(processInfo.hThread);
-		CloseHandle(processInfo.hProcess);
-	}
+	// Setup.exe usually runs elevated: start the shell with the user's limited token.
+	ExplorerShell::Start();
 }
 
 static void WriteFileXOR( HANDLE hFile, const unsigned char *buf, int size )
@@ -507,9 +471,10 @@ int APIENTRY wWinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
 		CloseHandle(processInfo.hProcess);
 		DeleteFile(msiName);
 
-		// Only repair the shell after a successful transaction. Reboot-required
-		// outcomes deliberately keep Windows Installer in control of recovery.
-		if (code==ERROR_SUCCESS)
+		// The MSI stops Explorer before replacing files. A failed, cancelled or
+		// reboot-pending transaction must not leave the user without a taskbar;
+		// only skip the repair when Windows Installer is already rebooting.
+		if (code!=ERROR_SUCCESS_REBOOT_INITIATED)
 			RestoreExplorerShellIfNeeded(explorerWasRunning);
 
 		return code;

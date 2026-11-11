@@ -4541,7 +4541,7 @@ CSetting g_Settings[]={
 
 {L"Language",CSetting::TYPE_GROUP,IDS_LANGUAGE_SETTINGS_SM,0,0,0,NULL,NULL,GetLanguageSettings(COMPONENT_MENU)},
 	{L"Language",CSetting::TYPE_STRING,0,0,L"",CSetting::FLAG_COLD|CSetting::FLAG_SHARED},
-	{L"Update",CSetting::TYPE_BOOL,0,0,1,CSetting::FLAG_SHARED}, // this is here only to generate the ADMX entry
+	{L"Update",CSetting::TYPE_BOOL,0,0,0,CSetting::FLAG_SHARED}, // this is here only to generate the ADMX entry (WinSlim default: off)
 
 {NULL}
 };

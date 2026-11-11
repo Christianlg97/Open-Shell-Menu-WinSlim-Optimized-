@@ -2966,6 +2966,9 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 		{
 			QueueOpenFolder(pItemPidl1,false);
 			CloseSubMenus(CLOSE_POST,NULL);
+			// The asynchronous request does not deactivate the menu first, so also close the
+			// hidden Win7 top menu, like every other path that closes the whole menu.
+			if (g_TopWin7Menu && s_bAllPrograms) ::PostMessage(g_TopWin7Menu,WM_CLOSE,0,0);
 		}
 		res=0;
 	}
@@ -2997,7 +3000,11 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 		if (_stricmp(command,"opencontaining")==0 || selectedVerb.CompareNoCase(L"opencontaining")==0)
 		{
 			HRESULT queued=QueueOpenFolder(pItemPidl1,true);
-			if (SUCCEEDED(queued)) CloseSubMenus(CLOSE_POST,NULL);
+			if (SUCCEEDED(queued))
+			{
+				CloseSubMenus(CLOSE_POST,NULL);
+				if (g_TopWin7Menu && s_bAllPrograms) ::PostMessage(g_TopWin7Menu,WM_CLOSE,0,0);
+			}
 			LOG_MENU(LOG_EXECUTE,L"Queue open location, res=%08X",queued);
 			DestroyMenu(menu);
 			s_HotPos=GetMessagePos();
