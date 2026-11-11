@@ -9,6 +9,7 @@
 #include <set>
 #include <list>
 #include <vector>
+#include <atomic>
 
 interface IImageList2;
 interface IWICImagingFactory;
@@ -105,10 +106,13 @@ public:
 		{
 			smallIcon=largeIcon=extraLargeIcon=NULL;
 			validFlags=refreshFlags=0;
+			queuedHigh=queuedLow=false;
 			bIconOnly=bTemp=bLink=bExplicitAppId=bNoPin=bNoNew=bMetroLink=bMetroApp=bProtectedLink=false;
 			writestamp.dwHighDateTime=writestamp.dwLowDateTime=0;
 			createstamp.dwHighDateTime=createstamp.dwLowDateTime=0;
 			location=LOCATION_UNKNOWN;
+			iconColor=0;
+			iconIndex=0;
 		}
 
 		// PATH never changes after the item is created. it can be accessed without a lock
@@ -156,6 +160,7 @@ public:
 
 		int validFlags;
 		int refreshFlags; // 0 if not in the queue, the item can't be deleted if this is !=0
+		bool queuedHigh, queuedLow; // membership is protected by RWLOCK_ITEMS
 
 		CAbsolutePidl targetPidl;
 		CString targetPATH;
@@ -370,7 +375,9 @@ private:
 		LOAD_LOADING, // the loading threads are running
 	};
 	volatile TLoadingStage m_LoadingStage;
-	int m_LastCacheSave;
+	DWORD m_LastCacheSave;
+	std::atomic<bool> m_bCacheDisabled{false};
+	std::atomic<bool> m_bCacheDebug{false};
 	COLORREF m_OldSysAccentColor;
 	bool m_bOldInvertIcons;
 
@@ -382,6 +389,7 @@ private:
 	void RefreshInfoThread( void );
 	static DWORD CALLBACK StaticRefreshInfoThread( void *param );
 	static DWORD CALLBACK SaveCacheFileThread( void *param );
+	static DWORD SaveCacheFileImpl( void *param );
 
 	// all paths are in caps and end with backslash
 	CString m_RootStartMenu1;

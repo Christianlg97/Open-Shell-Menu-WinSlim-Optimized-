@@ -90,6 +90,7 @@
     <ClInclude Include="LanguageSettingsHelper.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="ResourceHelper.h" />
+    <ClInclude Include="RustCore.h" />
     <ClInclude Include="Settings.h" />
     <ClInclude Include="SettingsParser.h" />
     <ClInclude Include="SettingsUIHelper.h" />

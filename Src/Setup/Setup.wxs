@@ -34,7 +34,15 @@
 		<?if $(var.x64)=1 ?>
 		<Condition Message="!(loc.Error64bit)">NOT (WIX_NATIVE_MACHINE AND WIX_NATIVE_MACHINE="43620")</Condition>
 		<?endif ?>
+		<?ifdef env.CS_WINSLIM_RUST ?>
+		<!-- VersionNT is reported as 603 even on Windows 10/11. -->
+		<Property Id="WINSLIM_OS_BUILD" Secure="yes">
+			<RegistrySearch Id="WinSlimOsBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentBuildNumber" Type="raw" Win64="$(var.CS_WIN64)" />
+		</Property>
+		<Condition Message="This WinSlim build requires Windows 10 or newer.">Installed OR WINSLIM_OS_BUILD&gt;=10240</Condition>
+		<?else ?>
 		<Condition Message="!(loc.ErrorWin7)">VersionNT&gt;=601</Condition>
+		<?endif ?>
 		<Condition Message="!(loc.ErrorNewVersion)">NOT NEWERPRODUCTFOUND OR Installed</Condition>
 		<Directory Id="TARGETDIR" Name="SourceDir">
 			<Directory Id="$(var.CS_PROGRAM_FILES)" Name="PFiles">

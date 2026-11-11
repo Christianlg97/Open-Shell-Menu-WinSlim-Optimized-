@@ -1,6 +1,6 @@
 @echo off
 set PATH=C:\Program Files (x86)\HTML Help Workshop;C:\Program Files (x86)\WiX Toolset v3.14\bin\;%PATH%
-cd %~dp0
+cd /d "%~dp0"
 
 call _Version.bat
 
@@ -28,7 +28,8 @@ echo -- Building Installer (%CS_LANG_NAME_SHORT%)
 @if _%CS_LANG_NAME%==_ echo Unrecognized language '%CS_LANG_FOLDER%'
 @if _%CS_LANG_NAME%==_ exit /b 1
 
-if exist Temp rd /Q /S Temp
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\..\tools\Clean-BuildDirectory.ps1" -RepositoryRoot "%~dp0..\.." -Path "%~dp0Temp"
+if errorlevel 1 exit /b 1
 md Temp
 
 @if not exist ..\Localization\%CS_LANG_FOLDER%\OpenShellText-%CS_LANG_NAME%.wxl exit /b 1
@@ -59,6 +60,7 @@ candle Setup.wxs -nologo -out Temp\Setup64.wixobj -ext WixUIExtension -ext WixUt
 light Temp\Setup64.wixobj -nologo -out Temp\Setup64.msi -ext WixUIExtension -ext WixUtilExtension -loc ..\Localization\%CS_LANG_FOLDER%\OpenShellText-%CS_LANG_NAME%.wxl -loc ..\Localization\%CS_LANG_FOLDER%\WixUI_%CS_LANG_NAME%.wxl -sice:ICE38 -sice:ICE43 -sice:ICE09
 @if ERRORLEVEL 1 exit /b 1
 
+if "%CS_BUILD_ARM64%"=="0" goto skip_arm64_msi
 REM ********* Build ARM64 MSI
 echo --- ARM64 MSI
 candle Setup.wxs -nologo -out Temp\SetupARM64.wixobj -ext WixUIExtension -ext WixUtilExtension -dx64=0 -dARM64=1 -dCS_LANG_FOLDER=%CS_LANG_FOLDER% -dCS_LANG_NAME=%CS_LANG_NAME%
@@ -68,6 +70,8 @@ candle Setup.wxs -nologo -out Temp\SetupARM64.wixobj -ext WixUIExtension -ext Wi
 @REM We need to suppress ICE09 because the helper DLLs need to go into the system directory (for safety reasons)
 light Temp\SetupARM64.wixobj -nologo -out Temp\SetupARM64.msi -ext WixUIExtension -ext WixUtilExtension -loc ..\Localization\%CS_LANG_FOLDER%\OpenShellText-%CS_LANG_NAME%.wxl -loc ..\Localization\%CS_LANG_FOLDER%\WixUI_%CS_LANG_NAME%.wxl -sice:ICE38 -sice:ICE43 -sice:ICE09
 @if ERRORLEVEL 1 exit /b 1
+
+:skip_arm64_msi
 
 SET CS_LANG_FOLDER=
 SET CS_LANG_NAME=

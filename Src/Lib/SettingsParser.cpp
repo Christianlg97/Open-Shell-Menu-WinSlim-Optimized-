@@ -6,7 +6,9 @@
 #include "SettingsParser.h"
 #include "ResourceHelper.h"
 #include "StringUtils.h"
+#include "RustCore.h"
 #include <algorithm>
+#include <memory>
 
 const int MAX_TREE_LEVEL=10;
 
@@ -17,16 +19,21 @@ bool CSettingsParser::LoadText( const wchar_t *fname )
 	FILE *f=NULL;
 	if (_wfopen_s(&f,fname,L"rb")) return false;
 	if (!f) return false;
+	std::unique_ptr<FILE,decltype(&fclose)> closeFile(f,&fclose);
 	fseek(f,0,SEEK_END);
-	int size=ftell(f);
+	long fileSize=ftell(f);
 	fseek(f,0,SEEK_SET);
-	std::vector<unsigned char> buf(size);
-	if (size<4 || fread(&buf[0],1,size,f)!=size)
+	if (fileSize<1 || fileSize>16*1024*1024)
 	{
-		fclose(f);
 		return false;
 	}
-	fclose(f);
+	int size=(int)fileSize;
+	std::vector<unsigned char> buf(size);
+	if (fread(&buf[0],1,size,f)!=size)
+	{
+		return false;
+	}
+	closeFile.reset();
 	LoadText(&buf[0],size);
 	return true;
 }
@@ -44,16 +51,18 @@ bool CSettingsParser::LoadText( HMODULE hMod, HRSRC hResInfo )
 
 void CSettingsParser::LoadText( const unsigned char *buf, int size )
 {
+	m_Text.clear();
+	if (!buf || size<=0 || size>16*1024*1024) return;
 	// copy buf to text and convert to UTF16
-	if (buf[0]==0xFF && buf[1]==0xFE)
+	if (size>=2 && buf[0]==0xFF && buf[1]==0xFE)
 	{
 		// UTF16
 		int len=(size-2)/2;
 		m_Text.resize(len+1);
-		memcpy(&m_Text[0],&buf[2],size-2);
+		memcpy(&m_Text[0],&buf[2],len*sizeof(wchar_t));
 		m_Text[len]=0;
 	}
-	else if (buf[0]==0xEF && buf[1]==0xBB && buf[2]==0xBF)
+	else if (size>=3 && buf[0]==0xEF && buf[1]==0xBB && buf[2]==0xBF)
 	{
 		// UTF8
 		int len=MultiByteToWideChar(CP_UTF8,0,(const char*)&buf[3],size-3,NULL,0);
@@ -66,13 +75,14 @@ void CSettingsParser::LoadText( const unsigned char *buf, int size )
 		// ACP
 		int len=MultiByteToWideChar(CP_ACP,0,(const char*)&buf[0],size,NULL,0);
 		m_Text.resize(len+1);
-		MultiByteToWideChar(CP_UTF8,0,(const char*)&buf[0],size,&m_Text[0],len);
+		MultiByteToWideChar(CP_ACP,0,(const char*)&buf[0],size,&m_Text[0],len);
 		m_Text[len]=0;
 	}
 }
 
 void CSettingsParser::LoadText( const wchar_t *buf, int size )
 {
+	if (!buf || size<0 || size>8*1024*1024) { m_Text.clear(); return; }
 	m_Text.resize(size+1);
 	memcpy(&m_Text[0],buf,size*2);
 	m_Text[size]=0;
@@ -81,33 +91,14 @@ void CSettingsParser::LoadText( const wchar_t *buf, int size )
 // Splits m_Text into m_Lines
 void CSettingsParser::ParseText( void )
 {
+	// The Rust scanner returns bounded offsets; all storage stays in this object.
+	m_Lines.clear();
 	if (m_Text.empty()) return;
-	// split into lines
-	wchar_t *str=&m_Text[0];
-	while (*str)
+	size_t cursor=0, start=0, end=0;
+	while (WinSlimNextLine(m_Text.data(),m_Text.size(),&cursor,&start,&end)==1)
 	{
-		if (*str!=';') // ignore lines starting with ;
-		{
-			// trim leading whitespace
-			while (*str==' ' || *str=='\t')
-				str++;
-			m_Lines.push_back(str);
-		}
-		wchar_t *p1=wcschr(str,'\r');
-		wchar_t *p2=wcschr(str,'\n');
-		wchar_t *end=&m_Text[m_Text.size()-1];
-		if (p1) end=p1;
-		if (p2 && p2<end) end=p2;
-
-		wchar_t *next=end;
-		while (*next=='\r' || *next=='\n')
-			next++;
-
-		// trim trailing whitespace
-		while (end>str && (*end==' ' || *end=='\t'))
-			end--;
-		*end=0;
-		str=next;
+		m_Text[end]=0;
+		m_Lines.push_back(m_Text.data()+start);
 	}
 }
 

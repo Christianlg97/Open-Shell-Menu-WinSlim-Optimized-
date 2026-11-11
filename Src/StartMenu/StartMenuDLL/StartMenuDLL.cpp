@@ -306,6 +306,8 @@ protected:
 	{
 		if (LOWORD(wParam)!=WA_INACTIVE)
 			return 0;
+		TraceInteraction(TRACE_OWNER_DEACTIVATE,m_hWnd,uMsg,wParam,lParam);
+		QueueInteractionTraceFlush();
 
 		if (CMenuContainer::s_bPreventClosing)
 			return 0;
@@ -585,6 +587,7 @@ static void UnhookDropTarget( void )
 // Toggle the start menu. bKeyboard - set to true to show the keyboard cues
 STARTMENUAPI HWND ToggleStartMenu( int taskbarId, bool bKeyboard )
 {
+	TraceInteraction(TRACE_TOGGLE,g_TaskBar,0,taskbarId,bKeyboard);
 	if (taskbarId==-1)
 	{
 		if (g_TaskbarInfos.find(-1)==g_TaskbarInfos.end())
@@ -3643,15 +3646,42 @@ static LRESULT CALLBACK HookDesktopThreadMouse(int code, WPARAM wParam, LPARAM l
 			if (!taskBar)
 			{
 				taskBar = FindTaskBarInfoBar(GetAncestor(info->hwnd, GA_ROOT)); // click on taskbar
-				if (taskBar && !PointAroundStartButton(taskBar->taskbarId))
+				if (taskBar && !PointAroundStartButton(taskBar->taskbarId,info->pt))
 					taskBar = NULL;
 			}
 
 			if (taskBar && (info->hwnd != taskBar->startButton) && taskBar->oldButton)
 			{
-				// steal messages from other than our custom button window
-				PostMessage(taskBar->oldButton, (UINT)wParam, 0, MAKELPARAM(info->pt.x, info->pt.y));
-				return 1;
+				// Normalize to the destination's client coordinates and preserve the
+				// key/button state. Never let XAML process a second copy of this event.
+				UINT message=(UINT)wParam;
+				if (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST)
+				{
+					HWND target=taskBar->startButton?taskBar->startButton:taskBar->oldButton;
+					POINT point=info->pt;
+					WPARAM keys=0;
+					if (GetKeyState(VK_LBUTTON)<0) keys|=MK_LBUTTON;
+					if (GetKeyState(VK_RBUTTON)<0) keys|=MK_RBUTTON;
+					if (GetKeyState(VK_MBUTTON)<0) keys|=MK_MBUTTON;
+					if (GetKeyState(VK_SHIFT)<0) keys|=MK_SHIFT;
+					if (GetKeyState(VK_CONTROL)<0) keys|=MK_CONTROL;
+					if (GetKeyState(VK_XBUTTON1)<0) keys|=MK_XBUTTON1;
+					if (GetKeyState(VK_XBUTTON2)<0) keys|=MK_XBUTTON2;
+					if (message==WM_LBUTTONDOWN || message==WM_LBUTTONDBLCLK) keys|=MK_LBUTTON;
+					if (message==WM_LBUTTONUP) keys&=~MK_LBUTTON;
+					if (message==WM_RBUTTONDOWN || message==WM_RBUTTONDBLCLK) keys|=MK_RBUTTON;
+					if (message==WM_RBUTTONUP) keys&=~MK_RBUTTON;
+					if (message==WM_MBUTTONDOWN || message==WM_MBUTTONDBLCLK) keys|=MK_MBUTTON;
+					if (message==WM_MBUTTONUP) keys&=~MK_MBUTTON;
+					if (message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL || message==WM_XBUTTONDOWN || message==WM_XBUTTONUP || message==WM_XBUTTONDBLCLK)
+						keys|=((const MOUSEHOOKSTRUCTEX*)info)->mouseData&0xFFFF0000;
+					if (message!=WM_MOUSEWHEEL && message!=WM_MOUSEHWHEEL) ScreenToClient(target,&point);
+					if (PostMessage(target,message,keys,MAKELPARAM(point.x,point.y)))
+					{
+						if (message!=WM_MOUSEMOVE) TraceInteraction(TRACE_FORWARDED,target,message,keys,MAKELPARAM(point.x,point.y));
+						return 1;
+					}
+				}
 			}
 		}
 	}
@@ -3687,7 +3717,18 @@ if (!g_bTrimHooks)
 			{
 				FindWindowsMenu();
 				bProcessing=true;
-				if (msg->wParam==MSG_TOGGLE || (msg->wParam==MSG_OPEN && !CMenuContainer::IsMenuOpened()))
+				if (msg->wParam==MSG_TOGGLE_MOUSE)
+				{
+					const TaskbarInfo *taskBar=GetTaskbarInfo((int)msg->lParam);
+					if (taskBar)
+					{
+						BOOL cues=FALSE;
+						SystemParametersInfo(SPI_GETKEYBOARDCUES,0,&cues,0);
+						ToggleStartMenu(taskBar->taskbarId,cues!=FALSE);
+						QueueInteractionTraceFlush();
+					}
+				}
+				else if (msg->wParam==MSG_TOGGLE || (msg->wParam==MSG_OPEN && !CMenuContainer::IsMenuOpened()))
 				{
 					const TaskbarInfo *taskBar=GetDefaultTaskbarInfo();
 					ToggleStartMenu(taskBar->taskbarId,true);
@@ -3912,7 +3953,11 @@ if (!g_bTrimHooks)
 					// click on the start button - toggle the menu
 					DWORD keyboard;
 					SystemParametersInfo(SPI_GETKEYBOARDCUES,NULL,&keyboard,0);
-					ToggleStartMenu(taskBar->taskbarId,keyboard!=0);
+					TraceInteraction(TRACE_MOUSE,msg->hwnd,msg->message,msg->wParam,msg->lParam);
+					if (IsWin11())
+						PostMessage(g_TaskBar,g_StartMenuMsg,MSG_TOGGLE_MOUSE,taskBar->taskbarId);
+					else
+						ToggleStartMenu(taskBar->taskbarId,keyboard!=0);
 				}
 				else if (control==OPEN_WINDOWS)
 					PostMessage(g_ProgWin,WM_SYSCOMMAND,SC_TASKLIST,'WSMM');
@@ -4381,6 +4426,7 @@ STARTMENUAPI LRESULT CALLBACK HookInject( int code, WPARAM wParam, LPARAM lParam
 
 STARTMENUAPI void InitManagers( bool bNohook )
 {
+	InitializeInteractionTrace();
 	InitializeSkinManager(bNohook);
 	g_ItemManager.Init(); // must be after skin manager because it uses the metro colors
 	g_SearchManager.Init();

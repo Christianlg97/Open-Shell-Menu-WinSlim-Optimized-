@@ -100,6 +100,7 @@ enum TMenuMsgParam // wParam for the OpenShellMenu.StartMenuMsg message
 	MSG_REDRAWTASKBAR, // redraw taskbar, lParam is the HWND (NULL for all)
 	MSG_RELOADSETTINGS, // reloads the settings from the registry
 	MSG_SETMONITOR, // sets the start screen monitor
+	MSG_TOGGLE_MOUSE, // deferred mouse activation; lParam is the taskbar ID
 };
 
 STARTMENUAPI extern enum _MINIDUMP_TYPE MiniDumpType;

@@ -1594,7 +1594,7 @@ STDMETHODIMP CExplorerBHO::OnDocumentComplete( IDispatch *pDisp, VARIANT *URL )
 						else if (SUCCEEDED(SHGetNameFromIDList(m_CurPidl,SIGDN_FILESYSPATH,&pPath)))
 							Strcpy(m_CurPath,_countof(m_CurPath),pPath); // just in case DESKTOPABSOLUTE fails let's try the FILESYSPATH. probably not needed
 						SHFILEINFO info;
-						if (SUCCEEDED(SHGetFileInfo((LPCTSTR)(PIDLIST_ABSOLUTE)m_CurPidl,0,&info,sizeof(info),SHGFI_ICON|SHGFI_SMALLICON|SHGFI_PIDL)))
+						if (SHGetFileInfo((LPCTSTR)(PIDLIST_ABSOLUTE)m_CurPidl,0,&info,sizeof(info),SHGFI_ICON|SHGFI_SMALLICON|SHGFI_PIDL))
 							m_CurIcon=info.hIcon;
 					}
 				}

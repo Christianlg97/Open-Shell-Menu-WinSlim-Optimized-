@@ -4,6 +4,7 @@
 
 #include "stdafx.h"
 #include "ItemManager.h"
+#include "RustCore.h"
 #include "MetroLinkManager.h"
 #include "FNVHash.h"
 #include "Settings.h"
@@ -18,6 +19,7 @@
 #include <CommonControls.h>
 #include <wincodec.h>
 #include <algorithm>
+#include <memory>
 
 //#define DISABLE_CACHE
 //#define FORCE_ALL_NEW
@@ -537,6 +539,8 @@ CItemManager::~CItemManager( void )
 void CItemManager::Init( void )
 {
 	m_MainThreadId=GetCurrentThreadId();
+	m_bCacheDisabled.store(false);
+	m_LastCacheSave=0;
 
 	{
 		// get the DPI setting
@@ -679,6 +683,15 @@ void CItemManager::Close( void )
 			DeleteObject(it->second.bitmap);
 	}
 
+	m_IconInfos.clear();
+	m_ItemInfos.clear();
+	m_ItemQueue.clear();
+	m_ItemQueueLow.clear();
+	m_MetroItemInfos10.clear();
+	m_ListSizes.clear();
+	for (HBITMAP bitmap:m_OldBitmaps) DeleteObject(bitmap);
+	m_OldBitmaps.clear();
+	m_DefaultSmallIcon=m_DefaultLargeIcon=m_DefaultExtraLargeIcon=NULL;
 	for (int i=0;i<LOCK_COUNT;i++)
 		DeleteCriticalSection(&m_CriticalSections[i]);
 	g_pAppResolver=NULL;
@@ -773,6 +786,7 @@ void CItemManager::ResetTempIcons( void )
 			if ((*it)->bTemp)
 			{
 				Assert(!(*it)->largeIcon && !(*it)->extraLargeIcon && ((*it)->smallIcon==m_DefaultSmallIcon || (*it)->smallIcon->bTemp));
+				(*it)->queuedHigh=false;
 				m_ItemQueue.erase(it);
 			}
 			it=next;
@@ -1045,18 +1059,25 @@ void CItemManager::UpdateItemInfo( const ItemInfo *pInfo, int refreshFlags, bool
 	{
 		Assert(!RWLock::ThreadHasReadLock(RWLOCK_ITEMS));
 	}
-	refreshFlags&=~pInfo->validFlags; // potentially out of lock, assuming validFlags is atomic
-	if (refreshFlags)
+	bool refreshOutsideLock=false;
 	{
 		RWLock lock(this,true,bHasWriteLock?RWLOCK_COUNT:RWLOCK_ITEMS);
+		refreshFlags&=~pInfo->validFlags;
 		if ((refreshFlags&INFO_ICON) && !(refreshFlags&INFO_REFRESH_NOW) && GetSettingBool(L"DelayIcons"))
 		{
 			QueueItemInfo(const_cast<ItemInfo*>(pInfo),refreshFlags&INFO_ICON);
 			refreshFlags&=~INFO_ICON;
 		}
 		if (refreshFlags)
-			RefreshItemInfo(const_cast<ItemInfo*>(pInfo),refreshFlags,NULL,true);
+		{
+			if (bHasWriteLock || pInfo->bTemp)
+				RefreshItemInfo(const_cast<ItemInfo*>(pInfo),refreshFlags,NULL,true);
+			else
+				refreshOutsideLock=true;
+		}
 	}
+	if (refreshOutsideLock)
+		RefreshItemInfo(const_cast<ItemInfo*>(pInfo),refreshFlags,NULL,false);
 }
 
 const CItemManager::ItemInfo *CItemManager::GetCustomIcon( const wchar_t *location, int index, TIconSizeType iconSizeType, bool bTemp )
@@ -1241,13 +1262,12 @@ void CItemManager::QueueItemInfo( ItemInfo *pInfo, int refreshFlags )
 	pInfo->refreshFlags|=refreshFlags&~pInfo->validFlags&(INFO_DATA|INFO_ICON);
 	if (pInfo->refreshFlags)
 	{
-		std::list<ItemInfo*> &queue=(thread==m_PreloadItemsThreadId)?m_ItemQueueLow:m_ItemQueue;
-		for (std::list<ItemInfo*>::const_iterator it=queue.begin();it!=queue.end();++it)
-		{
-			if (*it==pInfo)
-				return;
-		}
+		bool lowPriority=(thread==m_PreloadItemsThreadId);
+		bool &queued=lowPriority?pInfo->queuedLow:pInfo->queuedHigh;
+		if (queued) return;
+		std::list<ItemInfo*> &queue=lowPriority?m_ItemQueueLow:m_ItemQueue;
 		queue.push_back(pInfo);
+		queued=true;
 		SetEvent(m_WorkEvent);
 		if (thread!=m_PreloadItemsThreadId)
 			SetEvent(m_StartEvent);
@@ -1901,7 +1921,7 @@ void CItemManager::RefreshItemInfo( ItemInfo *pInfo, int refreshFlags, IShellIte
 						if (SUCCEEDED(pLink->GetIDList(&newInfo.targetPidl)))
 						{
 							wchar_t path[_MAX_PATH];
-							if (SUCCEEDED(SHGetPathFromIDList(newInfo.targetPidl,path)))
+							if (SHGetPathFromIDList(newInfo.targetPidl,path))
 							{
 								CharUpper(path);
 								newInfo.targetPATH=path;
@@ -2902,7 +2922,7 @@ void CItemManager::PreloadItemsThread( void )
 			}
 
 			wchar_t path[_MAX_PATH];
-			if (i<NUM_WATCHED_DIRS && dirMask==0xFFFFFFFF && SUCCEEDED(SHGetPathFromIDList(pidl,path)))
+			if (i<NUM_WATCHED_DIRS && dirMask==0xFFFFFFFF && SHGetPathFromIDList(pidl,path))
 			{
 				handles[dirCount]=FindFirstChangeNotification(path,TRUE,FILE_NOTIFY_CHANGE_FILE_NAME|FILE_NOTIFY_CHANGE_DIR_NAME|FILE_NOTIFY_CHANGE_LAST_WRITE);
 				if (handles[dirCount]!=INVALID_HANDLE_VALUE)
@@ -2991,11 +3011,13 @@ void CItemManager::RefreshInfoThread( void )
 					{
 						pItemInfo=*m_ItemQueue.begin();
 						m_ItemQueue.pop_front();
+						pItemInfo->queuedHigh=false;
 					}
 					else if (!m_ItemQueueLow.empty())
 					{
 						pItemInfo=*m_ItemQueueLow.begin();
 						m_ItemQueueLow.pop_front();
+						pItemInfo->queuedLow=false;
 					}
 					else
 						break;
@@ -3043,6 +3065,30 @@ DWORD CALLBACK CItemManager::StaticRefreshInfoThread( void *param )
 
 namespace
 {
+	class CacheHandle
+	{
+	public:
+		explicit CacheHandle(HANDLE value):m_Value(value) {}
+		~CacheHandle() { Close(); }
+		operator HANDLE() const { return m_Value; }
+		void Close() { if (m_Value!=INVALID_HANDLE_VALUE) CloseHandle(m_Value); m_Value=INVALID_HANDLE_VALUE; }
+	private:
+		CacheHandle(const CacheHandle &)=delete;
+		CacheHandle &operator=(const CacheHandle &)=delete;
+		HANDLE m_Value;
+	};
+	class CacheDC
+	{
+	public:
+		CacheDC():m_Value(CreateCompatibleDC(NULL)) {}
+		~CacheDC() { Close(); }
+		operator HDC() const { return m_Value; }
+		void Close() { if (m_Value) DeleteDC(m_Value); m_Value=NULL; }
+	private:
+		CacheDC(const CacheDC &)=delete;
+		CacheDC &operator=(const CacheDC &)=delete;
+		HDC m_Value;
+	};
 	struct IconData
 	{
 		unsigned int key;
@@ -3057,13 +3103,13 @@ namespace
 		unsigned int key;
 		FILETIME writestamp;
 		FILETIME createstamp;
-		bool bIconOnly;
-		bool bLink;
-		bool bMetroLink;
-		bool bProtectedLink;
-		bool bNoPin;
-		bool bNoNew;
-		bool bExplicitAppId;
+		BYTE bIconOnly;
+		BYTE bLink;
+		BYTE bMetroLink;
+		BYTE bProtectedLink;
+		BYTE bNoPin;
+		BYTE bNoNew;
+		BYTE bExplicitAppId;
 		int pidlSize;
 		int pathLen;
 		int PATHLen;
@@ -3081,130 +3127,161 @@ namespace
 	};
 }
 
+static uint64_t CacheBytesRemaining( HANDLE file )
+{
+	LARGE_INTEGER zero={}, position={}, size={};
+	if (!GetFileSizeEx(file,&size) || size.QuadPart<0 || size.QuadPart>512LL*1024*1024 ||
+		!SetFilePointerEx(file,zero,&position,FILE_CURRENT) || position.QuadPart>size.QuadPart)
+		return 0;
+	return (uint64_t)(size.QuadPart-position.QuadPart);
+}
+
+static bool CacheLanguageHash( DWORD &hash )
+{
+	ULONG count=0, length=0;
+	if (!GetUserPreferredUILanguages(MUI_LANGUAGE_ID,&count,NULL,&length) || !length || length>32767) return false;
+	std::vector<wchar_t> languages(length);
+	if (!GetUserPreferredUILanguages(MUI_LANGUAGE_ID,&count,languages.data(),&length)) return false;
+	hash=CalcFNVHash(languages.data(),length*sizeof(wchar_t),FNV_HASH0);
+	return true;
+}
+
 static DWORD ReadCacheFile( HANDLE file )
 {
-	DWORD data;
-	DWORD q;
-	if (!ReadFile(file,&data,4,&q,NULL) || q!=4)
-		return 0;
-	return data;
+	DWORD data=0, read=0;
+	return ReadFile(file,&data,sizeof(data),&read,NULL) && read==sizeof(data)?data:0;
 }
 
 static bool ReadCacheFile( HANDLE file, IconData &data )
 {
-	DWORD q;
-	return ReadFile(file,&data,sizeof(data),&q,NULL)!=0 && q==sizeof(data);
+	DWORD read=0;
+	if (!ReadFile(file,&data,sizeof(data),&read,NULL) || read!=sizeof(data)) return false;
+	uint64_t pathBytes=WinSlimCheckedSpan(data.PATHLen,2,32767,CacheBytesRemaining(file));
+	DWORD bitmapBytes=WinSlimBitmapBytes(data.bitmapW,data.bitmapH);
+	return data.sizeType>=0 && data.sizeType<CItemManager::ICON_SIZE_COUNT && bitmapBytes &&
+		pathBytes!=UINT64_MAX && pathBytes+bitmapBytes<=CacheBytesRemaining(file);
 }
 
 static bool ReadCacheFile( HANDLE file, ItemData &data )
 {
-	DWORD q;
-	return ReadFile(file,&data,sizeof(data),&q,NULL)!=0 && q==sizeof(data);
+	DWORD read=0;
+	if (!ReadFile(file,&data,sizeof(data),&read,NULL) || read!=sizeof(data)) return false;
+	uint64_t remaining=CacheBytesRemaining(file);
+	const int lengths[]={data.pathLen,data.PATHLen,data.targetPATHLen,data.appidLen,data.metroNameLen,data.iconPathLen};
+	for (int length:lengths)
+	{
+		uint64_t bytes=WinSlimCheckedSpan(length,2,32767,remaining);
+		if (bytes==UINT64_MAX) return false;
+		remaining-=bytes;
+	}
+	for (int size:{data.pidlSize,data.targetPidlSize})
+	{
+		uint64_t bytes=WinSlimCheckedSpan(size,1,65536,remaining);
+		if (bytes==UINT64_MAX || (size>0 && size<2)) return false;
+		remaining-=bytes;
+	}
+	return data.bIconOnly<=1 && data.bLink<=1 && data.bMetroLink<=1 && data.bProtectedLink<=1 &&
+		data.bNoPin<=1 && data.bNoNew<=1 && data.bExplicitAppId<=1 &&
+		!(data.validFlags&~(CItemManager::INFO_DATA|CItemManager::INFO_ICON));
 }
 
 static bool ReadCacheFile( HANDLE file, CAbsolutePidl &data, int size )
 {
-	if (size>0)
+	if (WinSlimCheckedSpan(size,1,65536,CacheBytesRemaining(file))==UINT64_MAX) return false;
+	if (!size) return true;
+	PIDLIST_ABSOLUTE pidl=(PIDLIST_ABSOLUTE)CoTaskMemAlloc(size);
+	if (!pidl) return false;
+	DWORD read=0;
+	if (!ReadFile(file,pidl,size,&read,NULL) || read!=(DWORD)size ||
+		!WinSlimValidatePidl((const unsigned char*)pidl,size))
 	{
-		PIDLIST_ABSOLUTE pidl=(PIDLIST_ABSOLUTE)CoTaskMemAlloc(size);
-		if (!pidl) return false;
-		DWORD q;
-		if (!ReadFile(file,pidl,size,&q,NULL) || q!=size)
-		{
-			ILFree(pidl);
-			return false;
-		}
-		data.Attach(pidl);
+		ILFree(pidl);
+		return false;
 	}
+	data.Attach(pidl);
 	return true;
 }
 
-static bool ReadCacheFile( HANDLE file, CString &data, int len )
+static bool ReadCacheFile( HANDLE file, CString &data, int length )
 {
-	if (len>0)
-	{
-		DWORD q;
-		if (!ReadFile(file,data.GetBuffer(len),len*2,&q,NULL) || q!=len*2)
-		{
-			data.Empty();
-			return false;
-		}
-		data.ReleaseBuffer(len);
-	}
-	return true;
+	uint64_t bytes=WinSlimCheckedSpan(length,2,32767,CacheBytesRemaining(file));
+	if (bytes==UINT64_MAX) return false;
+	if (!length) { data.Empty(); return true; }
+	DWORD read=0;
+	bool ok=ReadFile(file,data.GetBuffer(length),(DWORD)bytes,&read,NULL) && read==bytes;
+	data.ReleaseBuffer(ok?length:0);
+	return ok;
 }
 
 static bool ReadCacheFile( HANDLE file, HDC hdc, HBITMAP &data, int width, int height )
 {
-	std::vector<DWORD> bits(width*height);
-	if (bits.empty()) return false;
-	BITMAPINFO bi={0};
+	data=NULL;
+	DWORD bytes=WinSlimBitmapBytes(width,height);
+	if (!bytes || bytes>CacheBytesRemaining(file)) return false;
+	BITMAPINFO bi={};
 	bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
 	bi.bmiHeader.biWidth=width;
 	bi.bmiHeader.biHeight=height;
 	bi.bmiHeader.biPlanes=1;
 	bi.bmiHeader.biBitCount=32;
-	DWORD q;
-	int size=width*height*4;
-	if (!ReadFile(file,&bits[0],size,&q,NULL) || q!=size)
+	void *bits=NULL;
+	data=CreateDIBSection(hdc,&bi,DIB_RGB_COLORS,&bits,NULL,0);
+	if (!data) return false;
+	DWORD read=0;
+	if (!ReadFile(file,bits,bytes,&read,NULL) || read!=bytes)
+	{
+		DeleteObject(data);
+		data=NULL;
 		return false;
-	unsigned int *pBits;
-	data=CreateDIBSection(hdc,&bi,DIB_RGB_COLORS,(void**)&pBits,NULL,0);
-	if (!data)
-		return false;
-	memcpy(pBits,&bits[0],size);
+	}
 	return true;
 }
 
-static void WriteCacheFile( HANDLE file, DWORD data )
+static bool WriteCacheBytes( HANDLE file, const void *data, DWORD bytes )
 {
-	DWORD q;
-	WriteFile(file,&data,sizeof(data),&q,NULL);
-}
-
-static void WriteCacheFile( HANDLE file, const IconData &data )
-{
-	DWORD q;
-	WriteFile(file,&data,sizeof(data),&q,NULL);
-}
-
-static void WriteCacheFile( HANDLE file, const ItemData &data )
-{
-	DWORD q;
-	WriteFile(file,&data,sizeof(data),&q,NULL);
-}
-
-static void WriteCacheFile( HANDLE file, PIDLIST_ABSOLUTE data, int size )
-{
-	if (size>0)
+	const BYTE *cursor=(const BYTE*)data;
+	while (bytes)
 	{
-		DWORD q;
-		WriteFile(file,data,size,&q,NULL);
+		DWORD written=0;
+		if (!WriteFile(file,cursor,bytes,&written,NULL) || !written) return false;
+		cursor+=written;
+		bytes-=written;
 	}
+	return true;
 }
 
-static void WriteCacheFile( HANDLE file, const CString &data )
+static bool WriteCacheFile( HANDLE file, DWORD data ) { return WriteCacheBytes(file,&data,sizeof(data)); }
+static bool WriteCacheFile( HANDLE file, const IconData &data ) { return WriteCacheBytes(file,&data,sizeof(data)); }
+static bool WriteCacheFile( HANDLE file, const ItemData &data ) { return WriteCacheBytes(file,&data,sizeof(data)); }
+static bool WriteCacheFile( HANDLE file, PIDLIST_ABSOLUTE data, int size ) { return size>=0 && WriteCacheBytes(file,data,size); }
+static bool WriteCacheFile( HANDLE file, const CString &data ) { return WriteCacheBytes(file,(const wchar_t*)data,data.GetLength()*sizeof(wchar_t)); }
+
+static bool SnapshotCacheBitmap( HDC hdc, HBITMAP bitmap, int width, int height, std::vector<DWORD> &bits )
 {
-	if (!data.IsEmpty())
+	DWORD bytes=WinSlimBitmapBytes(width,height);
+	if (!bytes) return false;
+	bits.resize(bytes/sizeof(DWORD));
+	DIBSECTION source={};
+	if (GetObject(bitmap,sizeof(source),&source)==sizeof(source) && source.dsBm.bmBits &&
+		source.dsBm.bmBitsPixel==32 && source.dsBm.bmWidth==width && source.dsBm.bmHeight==height &&
+		source.dsBm.bmWidthBytes>=width*4)
 	{
-		DWORD q;
-		WriteFile(file,(const wchar_t*)data,data.GetLength()*2,&q,NULL);
+		// Stored WIC icons are DIB sections. Copy their pixels directly, even
+		// when a paint DC currently has the bitmap selected. Cache rows are bottom-up.
+		for (int row=0;row<height;row++)
+		{
+			int sourceRow=source.dsBmih.biHeight<0?height-row-1:row;
+			memcpy(bits.data()+(size_t)row*width,(const BYTE*)source.dsBm.bmBits+(size_t)sourceRow*source.dsBm.bmWidthBytes,width*4);
+		}
+		return true;
 	}
-}
-
-static void WriteCacheFile( HANDLE file, HDC hdc, HBITMAP data, int width, int height )
-{
-	std::vector<DWORD> bits(width*height);
-	if (bits.empty()) return;
-	BITMAPINFO bi={0};
+	BITMAPINFO bi={};
 	bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
 	bi.bmiHeader.biWidth=width;
 	bi.bmiHeader.biHeight=height;
 	bi.bmiHeader.biPlanes=1;
 	bi.bmiHeader.biBitCount=32;
-	GetDIBits(hdc,data,0,height,&bits[0],&bi,DIB_RGB_COLORS);
-	DWORD q;
-	WriteFile(file,&bits[0],width*height*4,&q,NULL);
+	return GetDIBits(hdc,bitmap,0,height,bits.data(),&bi,DIB_RGB_COLORS)==height;
 }
 
 bool CItemManager::CompareModuleTimeStamp( const CString &PATH, const FILETIME &timestamp, std::vector<ModuleInfo> &modules )
@@ -3240,148 +3317,152 @@ void CItemManager::LoadCacheFile( void )
 
 	HANDLE file=CreateFile(path,GENERIC_READ,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
 	if (file==INVALID_HANDLE_VALUE) return;
+	if (!CacheBytesRemaining(file)) { CloseHandle(file); return; }
 
 	bool bError=true;
-	DWORD tag=ReadCacheFile(file);
-	std::vector<ModuleInfo> modules;
-	ModuleInfo stdInfo={L"SHELL32.DLL"};
-	modules.push_back(stdInfo);
-	stdInfo.PATH=L"IMAGERES.DLL";
-	modules.push_back(stdInfo);
-	m_BlackListInfos10.clear();
-	if (tag=='CLSH')
+	try
 	{
-		tag=ReadCacheFile(file);
-		std::vector<const IconInfo*> remapIcons(1);
-		remapIcons[0]=NULL;
-		DWORD build;
-		if (tag==GetVersionEx(g_Instance,&build) && ReadCacheFile(file)==CACHE_FILE_VERSION)
+		DWORD tag=ReadCacheFile(file);
+		std::vector<ModuleInfo> modules;
+		ModuleInfo stdInfo={L"SHELL32.DLL"};
+		modules.push_back(stdInfo);
+		stdInfo.PATH=L"IMAGERES.DLL";
+		modules.push_back(stdInfo);
+		m_BlackListInfos10.clear();
+		if (tag=='CLSH')
 		{
-			int size1=ReadCacheFile(file);
-			int size2=ReadCacheFile(file);
-			int size3=ReadCacheFile(file);
-			int langHash=ReadCacheFile(file);
-			bError=false;
 			tag=ReadCacheFile(file);
-			HDC hdc=CreateCompatibleDC(NULL);
-			while (tag=='ICON')
+			std::vector<const IconInfo*> remapIcons(1);
+			remapIcons[0]=NULL;
+			DWORD build;
+			if (tag==GetVersionEx(g_Instance,&build) && ReadCacheFile(file)==CACHE_FILE_VERSION)
 			{
-				IconData data;
-				if (!ReadCacheFile(file,data))
+				int size1=ReadCacheFile(file);
+				int size2=ReadCacheFile(file);
+				int size3=ReadCacheFile(file);
+				int langHash=ReadCacheFile(file);
+				bError=false;
+				tag=ReadCacheFile(file);
+				CacheDC hdc;
+				while (tag=='ICON')
 				{
-					bError=true;
-					break;
-				}
-				IconInfo info;
-				info.sizeType=data.sizeType;
-				info.timestamp=data.timestamp;
-				info.bTemp=false;
-				info.bMetro=false;
-				if (!ReadCacheFile(file,info.PATH,data.PATHLen))
-				{
-					bError=true;
-					break;
-				}
-				if (size1==SMALL_ICON_SIZE && size2==LARGE_ICON_SIZE && size3==EXTRA_LARGE_ICON_SIZE && CompareModuleTimeStamp(info.PATH,info.timestamp,modules))
-				{
-					if (!ReadCacheFile(file,hdc,info.bitmap,data.bitmapW,data.bitmapH))
+					IconData data;
+					if (!ReadCacheFile(file,data))
 					{
 						bError=true;
 						break;
 					}
-					remapIcons.push_back(&m_IconInfos.emplace(data.key,info)->second);
+					IconInfo info;
+					info.sizeType=data.sizeType;
+					info.timestamp=data.timestamp;
+					info.bTemp=false;
+					info.bMetro=false;
+					if (!ReadCacheFile(file,info.PATH,data.PATHLen))
+					{
+						bError=true;
+						break;
+					}
+					if (size1==SMALL_ICON_SIZE && size2==LARGE_ICON_SIZE && size3==EXTRA_LARGE_ICON_SIZE && CompareModuleTimeStamp(info.PATH,info.timestamp,modules))
+					{
+						if (!ReadCacheFile(file,hdc,info.bitmap,data.bitmapW,data.bitmapH))
+						{
+							bError=true;
+							break;
+						}
+						remapIcons.push_back(&m_IconInfos.emplace(data.key,info)->second);
+					}
+					else
+					{
+						LARGE_INTEGER skip={};
+						skip.QuadPart=WinSlimBitmapBytes(data.bitmapW,data.bitmapH);
+						if (!SetFilePointerEx(file,skip,NULL,FILE_CURRENT)) { bError=true; break; }
+						remapIcons.push_back(NULL);
+					}
+					tag=ReadCacheFile(file);
+				}
+				hdc.Close();
+				if (tag!='ITEM')
+				{
+					bError=true;
 				}
 				else
 				{
-					int size=data.bitmapW*data.bitmapH*4;
-					SetFilePointer(file,size,NULL,FILE_CURRENT);
-					remapIcons.push_back(NULL);
+					DWORD hash=0;
+					bError=!CacheLanguageHash(hash) || hash!=(DWORD)langHash;
 				}
-				tag=ReadCacheFile(file);
-			}
-			DeleteDC(hdc);
-			if (tag!='ITEM')
-			{
-				bError=true;
-			}
-			else
-			{
-				wchar_t languages[100];
-				DWORD size=0;
-				DWORD len=_countof(languages);
-				GetUserPreferredUILanguages(MUI_LANGUAGE_ID,&size,languages,&len);
-				bError=(CalcFNVHash(languages,len*2,FNV_HASH0)!=langHash);
-			}
-			while (!bError && tag=='ITEM')
-			{
-				ItemData data;
-				if (!ReadCacheFile(file,data))
+				while (!bError && tag=='ITEM')
 				{
+					ItemData data;
+					if (!ReadCacheFile(file,data))
+					{
+						bError=true;
+						break;
+					}
+					ItemInfo &info=m_ItemInfos.emplace(data.key,ItemInfo())->second;
+
+					info.writestamp=data.writestamp;
+					info.createstamp=data.createstamp;
+					info.bIconOnly=data.bIconOnly;
+					info.bTemp=false;
+					info.bLink=data.bLink;
+					info.bMetroLink=data.bMetroLink;
+					info.bProtectedLink=data.bProtectedLink;
+					info.bNoPin=data.bNoPin;
+					info.bNoNew=data.bNoNew;
+					info.bExplicitAppId=data.bExplicitAppId;
+					info.validFlags=data.validFlags;
+					info.refreshFlags=0;
+					info.iconColor=data.iconColor;
+					info.iconIndex=data.iconIndex;
+
+					info.smallIcon=data.smallIcon>=0 && (size_t)data.smallIcon<remapIcons.size()?remapIcons[data.smallIcon]:NULL;
+					if (!info.smallIcon)
+					{
+						info.validFlags&=~INFO_SMALL_ICON;
+						info.smallIcon=m_DefaultSmallIcon;
+					}
+					info.largeIcon=data.largeIcon>=0 && (size_t)data.largeIcon<remapIcons.size()?remapIcons[data.largeIcon]:NULL;
+					if (!info.largeIcon)
+					{
+						info.validFlags&=~INFO_LARGE_ICON;
+						info.largeIcon=m_DefaultLargeIcon;
+					}
+					info.extraLargeIcon=data.extraLargeIcon>=0 && (size_t)data.extraLargeIcon<remapIcons.size()?remapIcons[data.extraLargeIcon]:NULL;
+					if (!info.extraLargeIcon)
+					{
+						info.validFlags&=~INFO_EXTRA_LARGE_ICON;
+						info.extraLargeIcon=m_DefaultExtraLargeIcon;
+					}
+
+					bError=bError || !ReadCacheFile(file,info.pidl,data.pidlSize);
+					bError=bError || !ReadCacheFile(file,info.path,data.pathLen);
+					bError=bError || !ReadCacheFile(file,info.PATH,data.PATHLen);
+					bError=bError || !ReadCacheFile(file,info.targetPidl,data.targetPidlSize);
+					bError=bError || !ReadCacheFile(file,info.targetPATH,data.targetPATHLen);
+					bError=bError || !ReadCacheFile(file,info.appid,data.appidLen);
+					bError=bError || !ReadCacheFile(file,info.metroName,data.metroNameLen);
+					bError=bError || !ReadCacheFile(file,info.iconPath,data.iconPathLen);
+
+					tag=ReadCacheFile(file);
+				}
+				if (!bError && tag=='BLAK')
+				{
+					int count=ReadCacheFile(file);
+					bError=WinSlimCheckedSpan(count,4,1000000,CacheBytesRemaining(file))==UINT64_MAX;
+					for (int i=0;!bError && i<count;i++) m_BlackListInfos10.insert(ReadCacheFile(file));
+					bError=bError || CacheBytesRemaining(file)!=0;
+				}
+				else
 					bError=true;
-					break;
-				}
-				ItemInfo &info=m_ItemInfos.emplace(data.key,ItemInfo())->second;
-
-				info.writestamp=data.writestamp;
-				info.createstamp=data.createstamp;
-				info.bIconOnly=data.bIconOnly;
-				info.bTemp=false;
-				info.bLink=data.bLink;
-				info.bMetroLink=data.bMetroLink;
-				info.bProtectedLink=data.bProtectedLink;
-				info.bNoPin=data.bNoPin;
-				info.bNoNew=data.bNoNew;
-				info.bExplicitAppId=data.bExplicitAppId;
-				info.validFlags=data.validFlags;
-				info.refreshFlags=0;
-				info.iconColor=data.iconColor;
-				info.iconIndex=data.iconIndex;
-
-				info.smallIcon=data.smallIcon>=0 && (size_t)data.smallIcon<remapIcons.size()?remapIcons[data.smallIcon]:NULL;
-				if (!info.smallIcon)
-				{
-					info.validFlags&=~INFO_SMALL_ICON;
-					info.smallIcon=m_DefaultSmallIcon;
-				}
-				info.largeIcon=data.largeIcon>=0 && (size_t)data.largeIcon<remapIcons.size()?remapIcons[data.largeIcon]:NULL;
-				if (!info.largeIcon)
-				{
-					info.validFlags&=~INFO_LARGE_ICON;
-					info.largeIcon=m_DefaultLargeIcon;
-				}
-				info.extraLargeIcon=data.extraLargeIcon>=0 && (size_t)data.extraLargeIcon<remapIcons.size()?remapIcons[data.extraLargeIcon]:NULL;
-				if (!info.extraLargeIcon)
-				{
-					info.validFlags&=~INFO_EXTRA_LARGE_ICON;
-					info.extraLargeIcon=m_DefaultExtraLargeIcon;
-				}
-
-				bError=bError || !ReadCacheFile(file,info.pidl,data.pidlSize);
-				bError=bError || !ReadCacheFile(file,info.path,data.pathLen);
-				bError=bError || !ReadCacheFile(file,info.PATH,data.PATHLen);
-				bError=bError || !ReadCacheFile(file,info.targetPidl,data.targetPidlSize);
-				bError=bError || !ReadCacheFile(file,info.targetPATH,data.targetPATHLen);
-				bError=bError || !ReadCacheFile(file,info.appid,data.appidLen);
-				bError=bError || !ReadCacheFile(file,info.metroName,data.metroNameLen);
-				bError=bError || !ReadCacheFile(file,info.iconPath,data.iconPathLen);
-
-				tag=ReadCacheFile(file);
-			}
-			if (tag=='BLAK')
-			{
-				int count=ReadCacheFile(file);
-				for (int i=0;i<count;i++)
-				{
-					unsigned int hash=ReadCacheFile(file);
-					m_BlackListInfos10.insert(hash);
-				}
 			}
 		}
-	}
 
+	}
+	catch (...) { bError=true; } // a broken cache must never abort Explorer
 	CloseHandle(file);
 	if (bError)
 	{
+		DeleteFile(path);
 		m_ItemInfos.clear();
 		for (std::multimap<unsigned int,IconInfo>::const_iterator it=m_IconInfos.begin();it!=m_IconInfos.end();++it)
 		{
@@ -3395,209 +3476,193 @@ void CItemManager::LoadCacheFile( void )
 
 DWORD CALLBACK CItemManager::SaveCacheFileThread( void *param )
 {
+	try { return SaveCacheFileImpl(param); }
+	catch (...)
+	{
+		// RAII closed all snapshot resources; preserve the last complete database.
+		wchar_t path[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell\\DataCache.tmp";
+		DoEnvironmentSubst(path,_countof(path));
+		DeleteFile(path);
+		return 1;
+	}
+}
+
+DWORD CItemManager::SaveCacheFileImpl( void *param )
+{
 	CItemManager *pThis=(CItemManager*)param;
+	if (pThis->m_bCacheDisabled.load()) return 0;
 	wchar_t path[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell";
 	DoEnvironmentSubst(path,_MAX_PATH);
 	SHCreateDirectory(NULL,path);
 	Strcat(path,_countof(path),L"\\DataCache.tmp");
-	HANDLE file=CreateFile(path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
-	if (file==INVALID_HANDLE_VALUE) return 0;
-
-	WriteCacheFile(file,'CLSH');
-	WriteCacheFile(file,GetVersionEx(g_Instance));
-	WriteCacheFile(file,CACHE_FILE_VERSION);
-	WriteCacheFile(file,SMALL_ICON_SIZE);
-	WriteCacheFile(file,LARGE_ICON_SIZE);
-	WriteCacheFile(file,EXTRA_LARGE_ICON_SIZE);
-	{
-		wchar_t languages[100];
-		DWORD size=0;
-		DWORD len=_countof(languages);
-		GetUserPreferredUILanguages(MUI_LANGUAGE_ID,&size,languages,&len);
-		WriteCacheFile(file,CalcFNVHash(languages,len*2,FNV_HASH0));
-	}
+	CacheHandle file(CreateFile(path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL));
+	if (file==INVALID_HANDLE_VALUE) return 1;
+	DWORD languageHash=0;
+	bool ok=CacheLanguageHash(languageHash) &&
+		WriteCacheFile(file,'CLSH') && WriteCacheFile(file,GetVersionEx(g_Instance)) &&
+		WriteCacheFile(file,CACHE_FILE_VERSION) && WriteCacheFile(file,SMALL_ICON_SIZE) &&
+		WriteCacheFile(file,LARGE_ICON_SIZE) && WriteCacheFile(file,EXTRA_LARGE_ICON_SIZE) &&
+		WriteCacheFile(file,languageHash);
 
 	std::vector<const std::pair<const unsigned int,IconInfo>*> iconInfos;
 	{
 		RWLock lock(pThis,false,RWLOCK_ICONS);
-		for (std::multimap<unsigned int,IconInfo>::const_iterator it=pThis->m_IconInfos.begin();it!=pThis->m_IconInfos.end();++it)
-		{
-			if (!it->second.bTemp && !it->second.bMetro && !it->second.PATH.IsEmpty() && it->second.PATH[1]!='#' && it->first!=0)
-				iconInfos.push_back(&*it);
-		}
+		iconInfos.reserve(pThis->m_IconInfos.size());
+		for (const auto &entry:pThis->m_IconInfos)
+			if (!entry.second.bTemp && !entry.second.bMetro && !entry.second.PATH.IsEmpty() && entry.second.PATH[1]!='#' && entry.first!=0)
+				iconInfos.push_back(&entry);
 	}
-
 	std::vector<const std::pair<const unsigned int,ItemInfo>*> itemInfos;
 	std::vector<unsigned int> blackList;
 	{
 		RWLock lock(pThis,false,RWLOCK_ITEMS);
-		for (std::multimap<unsigned int,ItemInfo>::const_iterator it=pThis->m_ItemInfos.begin();it!=pThis->m_ItemInfos.end();++it)
-		{
-			if (!it->second.bTemp && it->first!=0)
-				itemInfos.push_back(&*it);
-		}
-		for (std::set<unsigned int>::const_iterator it=pThis->m_BlackListInfos10.begin();it!=pThis->m_BlackListInfos10.end();++it)
-			blackList.push_back(*it);
+		itemInfos.reserve(pThis->m_ItemInfos.size());
+		for (const auto &entry:pThis->m_ItemInfos)
+			if (!entry.second.bTemp && entry.first!=0) itemInfos.push_back(&entry);
+		blackList.assign(pThis->m_BlackListInfos10.begin(),pThis->m_BlackListInfos10.end());
 	}
-
-	HDC hdc=CreateCompatibleDC(NULL);
+	CacheDC hdc;
+	if (!hdc) ok=false;
 	std::map<const IconInfo*,int> remapIcons;
 	int iconIndex=1;
-	// save cached icons and info
-	for (std::vector<const std::pair<const unsigned int,IconInfo>*>::const_iterator it=iconInfos.begin();it!=iconInfos.end();++it)
+	for (const auto *entry:iconInfos)
 	{
-		RWLock lock(pThis,false,RWLOCK_ICONS);
-		if ((*it)->second.bTemp || (*it)->second.bMetro) continue;
-		remapIcons[&(*it)->second]=iconIndex++;
-		IconData data;
-		data.key=(*it)->first;
-		data.sizeType=(*it)->second.sizeType;
-		data.timestamp=(*it)->second.timestamp;
-		data.PATHLen=(*it)->second.PATH.GetLength();
-		BITMAP bmp;
-		GetObject((*it)->second.bitmap,sizeof(bmp),&bmp);
-		data.bitmapW=bmp.bmWidth;
-		data.bitmapH=bmp.bmHeight;
-
-		WriteCacheFile(file,'ICON');
-		WriteCacheFile(file,data);
-		WriteCacheFile(file,(*it)->second.PATH);
-		WriteCacheFile(file,hdc,(*it)->second.bitmap,data.bitmapW,data.bitmapH);
-	}
-	DeleteDC(hdc);
-
-	FILE *log=NULL;
-	if (g_LogCategories&LOG_CACHE)
-	{
-		wchar_t path3[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell\\DataCache.txt";
-		DoEnvironmentSubst(path3,_countof(path3));
-		if (_wfopen_s(&log,path3,L"wb")==0)
+		if (!ok || pThis->m_bCacheDisabled.load()) break;
+		IconData data={};
+		CString sourcePath;
+		std::vector<DWORD> pixels;
 		{
+			// Copy pixels and metadata, then release the lock before any disk I/O.
+			RWLock lock(pThis,false,RWLOCK_ICONS);
+			const IconInfo &icon=entry->second;
+			if (icon.bTemp || icon.bMetro) continue;
+			data.key=entry->first;
+			data.sizeType=icon.sizeType;
+			data.timestamp=icon.timestamp;
+			sourcePath=icon.PATH;
+			data.PATHLen=sourcePath.GetLength();
+			BITMAP bitmap={};
+			ok=GetObject(icon.bitmap,sizeof(bitmap),&bitmap)!=0;
+			data.bitmapW=bitmap.bmWidth;
+			data.bitmapH=bitmap.bmHeight;
+			ok=ok && SnapshotCacheBitmap(hdc,icon.bitmap,data.bitmapW,data.bitmapH,pixels);
+		}
+		if (!ok) break;
+		remapIcons[&entry->second]=iconIndex++;
+		ok=WriteCacheFile(file,'ICON') && WriteCacheFile(file,data) && WriteCacheFile(file,sourcePath) &&
+			WriteCacheBytes(file,pixels.data(),(DWORD)(pixels.size()*sizeof(DWORD)));
+	}
+	hdc.Close();
+
+	std::unique_ptr<FILE,decltype(&fclose)> log(NULL,&fclose);
+	if (pThis->m_bCacheDebug.load())
+	{
+		wchar_t logPath[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell\\DataCache.txt";
+		DoEnvironmentSubst(logPath,_countof(logPath));
+		FILE *opened=NULL;
+		if (_wfopen_s(&opened,logPath,L"wb")==0 && opened)
+		{
+			log.reset(opened);
 			wchar_t bom=0xFEFF;
-			fwrite(&bom,2,1,log);
+			fwrite(&bom,sizeof(bom),1,log.get());
 		}
 	}
-	for (std::vector<const std::pair<const unsigned int,ItemInfo>*>::const_iterator it=itemInfos.begin();it!=itemInfos.end();++it)
+	for (const auto *entry:itemInfos)
 	{
-		RWLock lock(pThis,false,RWLOCK_ITEMS);
-		if ((*it)->second.bTemp || (*it)->second.path.IsEmpty()) continue;
-
-		ItemData data;
-		data.key=(*it)->first;
-		data.writestamp=(*it)->second.writestamp;
-		data.createstamp=(*it)->second.createstamp;
-		data.bIconOnly=(*it)->second.bIconOnly;
-		data.bLink=(*it)->second.bLink;
-		data.bMetroLink=(*it)->second.bMetroLink;
-		data.bProtectedLink=(*it)->second.bProtectedLink;
-		data.bNoPin=(*it)->second.bNoPin;
-		data.bNoNew=(*it)->second.bNoNew;
-		data.bExplicitAppId=(*it)->second.bExplicitAppId;
-		data.pidlSize=(*it)->second.GetLatestPidl()?ILGetSize((*it)->second.GetLatestPidl()):0;
-		data.pathLen=(*it)->second.path.GetLength();
-		data.PATHLen=(*it)->second.PATH.GetLength();
-
-		std::map<const IconInfo*,int>::const_iterator remapIt=remapIcons.find((*it)->second.smallIcon);
-		data.smallIcon=(remapIt==remapIcons.end()?0:remapIt->second);
-		remapIt=remapIcons.find((*it)->second.largeIcon);
-		data.largeIcon=(remapIt==remapIcons.end()?0:remapIt->second);
-		remapIt=remapIcons.find((*it)->second.extraLargeIcon);
-		data.extraLargeIcon=(remapIt==remapIcons.end()?0:remapIt->second);
-
-		data.validFlags=(*it)->second.validFlags;
-		data.targetPidlSize=(*it)->second.targetPidl?ILGetSize((*it)->second.targetPidl):0;
-		data.targetPATHLen=(*it)->second.targetPATH.GetLength();
-		data.appidLen=(*it)->second.appid.GetLength();
-		data.metroNameLen=(*it)->second.metroName.GetLength();
-		data.iconPathLen=(*it)->second.iconPath.GetLength();
-		data.iconColor=(*it)->second.iconColor;
-		data.iconIndex=(*it)->second.iconIndex;
-
-		WriteCacheFile(file,'ITEM');
-		WriteCacheFile(file,data);
-		WriteCacheFile(file,(*it)->second.GetLatestPidl(),data.pidlSize);
-		WriteCacheFile(file,(*it)->second.path);
-		WriteCacheFile(file,(*it)->second.PATH);
-		WriteCacheFile(file,(*it)->second.targetPidl,data.targetPidlSize);
-		WriteCacheFile(file,(*it)->second.targetPATH);
-		WriteCacheFile(file,(*it)->second.appid);
-		WriteCacheFile(file,(*it)->second.metroName);
-		WriteCacheFile(file,(*it)->second.iconPath);
-		if (log) fwprintf(log,L"0x%08X - %s\r\n",(*it)->first,(const wchar_t*)(*it)->second.PATH);
+		if (!ok || pThis->m_bCacheDisabled.load()) break;
+		ItemInfo info;
+		unsigned int key;
+		{
+			RWLock lock(pThis,false,RWLOCK_ITEMS);
+			if (entry->second.bTemp || entry->second.path.IsEmpty()) continue;
+			info=entry->second;
+			key=entry->first;
+		}
+		// CString and PIDLs in this snapshot own their storage. Pointer identity
+		// is used only for the remap; no live cache entry is dereferenced here.
+		const CAbsolutePidl &pidl=info.newPidl?info.newPidl:info.pidl;
+		ItemData data={};
+		data.key=key;
+		data.writestamp=info.writestamp;
+		data.createstamp=info.createstamp;
+		data.bIconOnly=info.bIconOnly;
+		data.bLink=info.bLink;
+		data.bMetroLink=info.bMetroLink;
+		data.bProtectedLink=info.bProtectedLink;
+		data.bNoPin=info.bNoPin;
+		data.bNoNew=info.bNoNew;
+		data.bExplicitAppId=info.bExplicitAppId;
+		data.pidlSize=pidl?ILGetSize(pidl):0;
+		data.pathLen=info.path.GetLength();
+		data.PATHLen=info.PATH.GetLength();
+		auto remap=[&](const IconInfo *icon) -> int
+		{
+			auto it=remapIcons.find(icon);
+			return it==remapIcons.end()?0:it->second;
+		};
+		data.smallIcon=remap(info.smallIcon);
+		data.largeIcon=remap(info.largeIcon);
+		data.extraLargeIcon=remap(info.extraLargeIcon);
+		data.validFlags=info.validFlags;
+		data.targetPidlSize=info.targetPidl?ILGetSize(info.targetPidl):0;
+		data.targetPATHLen=info.targetPATH.GetLength();
+		data.appidLen=info.appid.GetLength();
+		data.metroNameLen=info.metroName.GetLength();
+		data.iconPathLen=info.iconPath.GetLength();
+		data.iconColor=info.iconColor;
+		data.iconIndex=info.iconIndex;
+		ok=WriteCacheFile(file,'ITEM') && WriteCacheFile(file,data) && WriteCacheFile(file,pidl,data.pidlSize) &&
+			WriteCacheFile(file,info.path) && WriteCacheFile(file,info.PATH) && WriteCacheFile(file,info.targetPidl,data.targetPidlSize) &&
+			WriteCacheFile(file,info.targetPATH) && WriteCacheFile(file,info.appid) && WriteCacheFile(file,info.metroName) && WriteCacheFile(file,info.iconPath);
+		if (log) fwprintf(log.get(),L"0x%08X - %s\r\n",key,(const wchar_t*)info.PATH);
 	}
-	{
-		WriteCacheFile(file,'BLAK');
-		WriteCacheFile(file,(DWORD)blackList.size());
-		for (std::vector<unsigned int>::const_iterator it=blackList.begin();it!=blackList.end();++it)
-			WriteCacheFile(file,*it);
-	}
-	if (log) fclose(log);
-
-	CloseHandle(file);
+	log.reset();
+	ok=ok && WriteCacheFile(file,'BLAK') && WriteCacheFile(file,(DWORD)blackList.size());
+	for (unsigned int hash:blackList) ok=ok && WriteCacheFile(file,hash);
+	LARGE_INTEGER fileSize={};
+	ok=ok && GetFileSizeEx(file,&fileSize) && fileSize.QuadPart<=512LL*1024*1024 && FlushFileBuffers(file);
+	file.Close();
 	wchar_t path2[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell\\DataCache.db";
 	DoEnvironmentSubst(path2,_MAX_PATH);
-	MoveFileEx(path,path2,MOVEFILE_REPLACE_EXISTING);
-	return 0;
+	if (ok && !pThis->m_bCacheDisabled.load()) ok=MoveFileEx(path,path2,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+	if (!ok || pThis->m_bCacheDisabled.load()) DeleteFile(path);
+	if (pThis->m_bCacheDisabled.load()) DeleteFile(path2);
+	return ok?0:1;
 }
 
 void CItemManager::SaveCacheFile( void )
 {
 #ifdef DISABLE_CACHE
-		return;
+	return;
 #endif
-	if (g_LogCategories&LOG_CACHE)
-	{
-		SaveCacheFileThread(this);
-		return;
-	}
-	int time=GetTickCount();
-	if (m_LastCacheSave && (time-m_LastCacheSave)<300000) // at least 5 minutes since the last save
-		return;
-	m_LastCacheSave=time;
+	if (m_bCacheDisabled.load()) return;
+	DWORD time=GetTickCount();
 	if (m_SaveCacheThread)
 	{
-		if (WaitForSingleObject(m_SaveCacheThread,0)==WAIT_TIMEOUT)
-			return;
+		if (WaitForSingleObject(m_SaveCacheThread,0)==WAIT_TIMEOUT) return;
+		DWORD result=0;
+		if (!GetExitCodeThread(m_SaveCacheThread,&result) || result!=0) m_LastCacheSave=0;
 		CloseHandle(m_SaveCacheThread);
 		m_SaveCacheThread=NULL;
 	}
+	if (m_LastCacheSave && (DWORD)(time-m_LastCacheSave)<300000) return;
+	// Logging must never switch cache writes back onto Explorer's UI thread.
+	m_bCacheDebug.store((g_LogCategories&LOG_CACHE)!=0);
 	m_SaveCacheThread=CreateThread(NULL,0,SaveCacheFileThread,this,0,NULL);
+	if (m_SaveCacheThread) m_LastCacheSave=time;
 }
 
 void CItemManager::ClearCache( void )
 {
-	// The save thread keeps pointers to persistent cache entries while serializing them.
-	// Let it finish before clearing the containers those pointers refer to.
-	if (m_SaveCacheThread)
-	{
-		WaitForSingleObject(m_SaveCacheThread,INFINITE);
-		CloseHandle(m_SaveCacheThread);
-		m_SaveCacheThread=NULL;
-	}
-
-	Lock cleanupLock(this,LOCK_CLEANUP);
-	RWLock itemLock(this,true,RWLOCK_ITEMS);
-	RWLock iconLock(this,true,RWLOCK_ICONS);
-
+	// ItemInfo pointers are borrowed by queued workers, search results and menus.
+	// A live purge cannot invalidate those borrowers. Remove the persisted cache
+	// now and rebuild memory on the next process start, without a UI-thread wait.
+	m_bCacheDisabled.store(true);
 	wchar_t path[_MAX_PATH]=L"%LOCALAPPDATA%\\OpenShell\\DataCache.db";
-	DoEnvironmentSubst(path,_MAX_PATH);
+	DoEnvironmentSubst(path,_countof(path));
 	DeleteFile(path);
-
-	m_BlackListInfos10.clear();
-	m_ItemInfos.clear();
-	for (std::multimap<unsigned int,IconInfo>::const_iterator it=m_IconInfos.begin();it!=m_IconInfos.end();++it)
-	{
-		if (it->second.bitmap)
-			DeleteObject(it->second.bitmap);
-	}
-	m_IconInfos.clear();
-	m_MetroItemInfos10.clear();
-	CreateDefaultIcons();
-	ItemInfo &item=m_ItemInfos.emplace(0,ItemInfo())->second;
-	item.bIconOnly=true;
-	item.smallIcon=m_DefaultSmallIcon;
-	item.largeIcon=m_DefaultLargeIcon;
-	item.extraLargeIcon=m_DefaultExtraLargeIcon;
+	// An in-flight writer also checks this flag after publication, closing the
+	// race where ClearCache runs between its final check and MoveFileEx.
 }
 
 int CItemManager::GetIconSize(TIconSizeType iconSizeType) const

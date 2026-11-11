@@ -797,7 +797,7 @@ HRESULT STDMETHODCALLTYPE CMenuContainer::Drop( IDataObject *pDataObj, DWORD grf
 					if (pItem->GetDisplayName(SIGDN_FILESYSPATH,&pPath)==S_OK && PathIsDirectory(pPath))
 					{
 						wchar_t path[_MAX_PATH];
-						if (SUCCEEDED(SHGetPathFromIDList(m_Path1[0],path)))
+						if (SHGetPathFromIDList(m_Path1[0],path))
 						{
 							wchar_t fname[_MAX_FNAME];
 							Strcpy(fname,_countof(fname),PathFindFileName(pPath));

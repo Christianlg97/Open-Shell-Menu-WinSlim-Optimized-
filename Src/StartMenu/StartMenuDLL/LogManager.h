@@ -37,3 +37,15 @@ void LogMessage( const wchar_t *text, ... );
 #define STARTUP_LOG L"Software\\OpenShell\\StartMenu\\Settings|LogStartup|%LOCALAPPDATA%\\OpenShell\\StartupLog.txt"
 
 void LogPropertyStore(TLogCategory category, IPropertyStore* store);
+
+// Optional bounded interaction trace. Recording never allocates or writes to disk.
+// Enable TraceInteractions (DWORD=1) in HKCU\Software\OpenShell\StartMenu\Settings.
+enum TInteractionTrace
+{
+	TRACE_MOUSE=1, TRACE_FORWARDED, TRACE_TOGGLE, TRACE_MENU_OPENED,
+	TRACE_MENU_DEACTIVATE, TRACE_OWNER_DEACTIVATE, TRACE_LAYER_FAILED,
+	TRACE_SHELL_QUEUED, TRACE_SHELL_RESOLVED, TRACE_SHELL_COMPLETED,
+};
+void InitializeInteractionTrace( void );
+void TraceInteraction( TInteractionTrace event, HWND window, UINT message, WPARAM wParam, LPARAM lParam );
+void QueueInteractionTraceFlush( void );

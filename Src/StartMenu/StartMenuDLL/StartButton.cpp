@@ -13,6 +13,7 @@
 #include "StartButton.h"
 #include "MenuContainer.h"
 #include "TouchHelper.h"
+#include "LogManager.h"
 #include "dllmain.h"
 #include <uxtheme.h>
 #include <vsstyle.h>
@@ -152,9 +153,9 @@ LRESULT CStartButton::OnCreate( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& b
 	LoadBitmap();
 	m_Tooltip=CreateWindowEx(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_TRANSPARENT|(m_bRTL?WS_EX_LAYOUTRTL:0),TOOLTIPS_CLASS,NULL,WS_POPUP|TTS_NOPREFIX|TTS_ALWAYSTIP,0,0,0,0,NULL,NULL,g_Instance,NULL);
 	OnThemeChanged(WM_THEMECHANGED,0,0,bHandled);
+	ResizeClient(m_Size.cx,m_Size.cy);
 	m_bPressed=true;
 	SetPressed(false);
-	ResizeClient(m_Size.cx,m_Size.cy);
 	bHandled=FALSE;
 	return 0;
 }
@@ -177,11 +178,14 @@ void CStartButton::UpdateButton( void )
 	BLENDFUNCTION func={AC_SRC_OVER,0,255,AC_SRC_ALPHA};
 
 	HDC hSrc=CreateCompatibleDC(NULL);
-	RECT rc;
-	GetWindowRect(&rc);
-	SIZE size={rc.right-rc.left,rc.bottom-rc.top};
+	if (!hSrc) return;
+	// The first draw happens during WM_CREATE, before the final window position.
+	// Always upload exactly one initialized frame rather than a transient HWND size.
+	SIZE size=m_Size;
+	if (size.cx<=0 || size.cy<=0) { DeleteDC(hSrc); return; }
 	if (m_bClassic)
 	{
+		if (!m_Blendmap || !m_BlendBits) { DeleteDC(hSrc); return; }
 		if (m_bRTL)
 			SetLayout(hSrc,LAYOUT_RTL);
 		HGDIOBJ bmp0=SelectObject(hSrc,m_Blendmap);
@@ -263,11 +267,13 @@ void CStartButton::UpdateButton( void )
 			}
 		}
 
-		if (image!=-1)
+		if (image==-1 && (!m_Blendmap || !m_BlendBits)) image=m_Frames[m_bHot?1:0];
+		if (image!=-1 && m_Bitmap)
 		{
 			HGDIOBJ bmp0=SelectObject(hSrc,m_Bitmap);
 			POINT pos={0,image*m_Size.cy+m_YOffset};
-			UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA);
+			if (!UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA))
+				TraceInteraction(TRACE_LAYER_FAILED,m_hWnd,0,GetLastError(),MAKELPARAM(size.cx,size.cy));
 			SelectObject(hSrc,bmp0);
 		}
 		else if (m_Bits)
@@ -296,7 +302,8 @@ void CStartButton::UpdateButton( void )
 			}
 			HGDIOBJ bmp0=SelectObject(hSrc,m_Blendmap);
 			POINT pos={0,0};
-			UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA);
+			if (!UpdateLayeredWindow(m_hWnd,NULL,NULL,&size,hSrc,&pos,0,&func,ULW_ALPHA))
+				TraceInteraction(TRACE_LAYER_FAILED,m_hWnd,0,GetLastError(),MAKELPARAM(size.cx,size.cy));
 			SelectObject(hSrc,bmp0);
 		}
 	}
@@ -491,7 +498,7 @@ void CStartButton::LoadBitmap( void )
 	m_Bits=m_BlendBits=NULL;
 	TStartButtonType buttonType=GetStartButtonType();
 	m_bClassic=(buttonType==START_BUTTON_CLASSIC);
-	wchar_t path[_MAX_PATH];
+	wchar_t path[_MAX_PATH]={};
 	SIZE size={0,0};
 	if (buttonType==START_BUTTON_CUSTOM)
 	{

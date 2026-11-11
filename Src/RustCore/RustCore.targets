@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <!-- The original scripts retain the legacy Windows 7/8 C++ build. The new
+         WinSlim build explicitly enables Rust and targets Windows 10/11. -->
+    <WinSlimUseRustCore Condition="'$(WinSlimUseRustCore)'==''">false</WinSlimUseRustCore>
+    <WinSlimRustTarget Condition="'$(Platform)'=='Win32'">i686-pc-windows-msvc</WinSlimRustTarget>
+    <WinSlimRustTarget Condition="'$(Platform)'=='x64'">x86_64-pc-windows-msvc</WinSlimRustTarget>
+    <WinSlimRustTarget Condition="'$(Platform)'=='ARM64'">aarch64-pc-windows-msvc</WinSlimRustTarget>
+    <WinSlimRustRoot>$(MSBuildThisFileDirectory)</WinSlimRustRoot>
+    <WinSlimRustOutput>$(MSBuildThisFileDirectory)..\..\build\rust\</WinSlimRustOutput>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(WinSlimUseRustCore)'=='true'">
+    <ClCompile><PreprocessorDefinitions>WINSLIM_USE_RUST;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+  </ItemDefinitionGroup>
+  <Target Name="BuildWinSlimRustCore" BeforeTargets="ClCompile" Condition="'$(MSBuildProjectName)'=='Lib' And '$(WinSlimUseRustCore)'=='true'">
+    <Error Condition="'$(WinSlimRustTarget)'==''" Text="Unsupported Rust platform: $(Platform)" />
+    <Exec Command="cargo rustc --locked --manifest-path &quot;$(WinSlimRustRoot)Cargo.toml&quot; --target-dir &quot;$(WinSlimRustOutput).&quot; --target $(WinSlimRustTarget) --release --lib -- -C target-feature=+crt-static" />
+  </Target>
+</Project>

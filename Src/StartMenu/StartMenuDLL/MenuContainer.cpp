@@ -6414,6 +6414,11 @@ LRESULT CMenuContainer::OnRefresh( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL
 
 LRESULT CMenuContainer::OnActivate( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled )
 {
+	if (LOWORD(wParam)==WA_INACTIVE)
+	{
+		TraceInteraction(TRACE_MENU_DEACTIVATE,m_hWnd,uMsg,wParam,lParam);
+		QueueInteractionTraceFlush();
+	}
 	if (LOWORD(wParam)!=WA_INACTIVE)
 	{
 		if (s_Tooltip.m_hWnd)
@@ -8654,6 +8659,8 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 	}
 	CheckForNewVersion(NULL,COMPONENT_MENU,CHECK_AUTO,NewVersionCallback);
 
+	TraceInteraction(TRACE_MENU_OPENED,pStartMenu->m_hWnd,0,bKeyboard,0);
+	QueueInteractionTraceFlush();
 	return pStartMenu->m_hWnd;
 }
 

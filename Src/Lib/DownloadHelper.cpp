@@ -16,6 +16,10 @@
 #include <nlohmann/json.hpp>
 #include <wininet.h>
 #include <softpub.h>
+#include <stdint.h>
+
+#pragma comment(lib, "wintrust.lib")
+#pragma comment(lib, "crypt32.lib")
 
 //#define UPDATE_LOG L"-|%LOCALAPPDATA%\\OpenShell\\UpdateLog.txt"
 
@@ -179,13 +183,17 @@ static TDownloadResult DownloadFile( const wchar_t *url, std::vector<char> &buf,
 		res=DOWNLOAD_CANCEL;
 
 	wchar_t host[256];
-	wchar_t file[256];
+	wchar_t file[2048];
 	URL_COMPONENTS components={sizeof(components)};
 	components.lpszHostName=host;
 	components.dwHostNameLength=_countof(host);
 	components.lpszUrlPath=file;
 	components.dwUrlPathLength=_countof(file);
-	InternetCrackUrl(url,0,0,&components);
+	if (!InternetCrackUrl(url,0,0,&components))
+	{
+		InternetCloseHandle(hInternet);
+		return DOWNLOAD_START;
+	}
 	int time=GetTickCount();
 	if (pProgress)
 		pProgress->SetText(LoadStringEx(IDS_PROGRESS_CONNECT));
@@ -213,6 +221,9 @@ static TDownloadResult DownloadFile( const wchar_t *url, std::vector<char> &buf,
 						DWORD index=0;
 						if (!HttpQueryInfo(hRequest,HTTP_QUERY_CONTENT_LENGTH|HTTP_QUERY_FLAG_NUMBER,&fileSize,&len,&index))
 							fileSize=0;
+						DWORD status=0, statusLength=sizeof(status);
+						if (!HttpQueryInfo(hRequest,HTTP_QUERY_STATUS_CODE|HTTP_QUERY_FLAG_NUMBER,&status,&statusLength,NULL) || status<200 || status>=300 || fileSize>256U*1024*1024)
+							res=DOWNLOAD_FAIL;
 					}
 					else
 						res=DOWNLOAD_START;
@@ -253,6 +264,11 @@ static TDownloadResult DownloadFile( const wchar_t *url, std::vector<char> &buf,
 							res=DOWNLOAD_CANCEL;
 							break;
 						}
+						if (size>256U*1024*1024-CHUNK_SIZE)
+						{
+							res=DOWNLOAD_FAIL;
+							break;
+						}
 						DWORD dwSize;
 						buf.resize(size+CHUNK_SIZE);
 						if (!InternetReadFile(hRequest,&buf[size],CHUNK_SIZE,&dwSize))
@@ -264,7 +280,7 @@ static TDownloadResult DownloadFile( const wchar_t *url, std::vector<char> &buf,
 							break;
 						size+=dwSize;
 						if (pProgress && fileSize)
-							pProgress->SetProgress(size*100/fileSize);
+							pProgress->SetProgress((int)((uint64_t)size*100/fileSize));
 					}
 					buf.resize(size);
 				}
@@ -541,14 +557,17 @@ static bool VerifyDigitalCertificate( const wchar_t *fname, const wchar_t *signe
 
 	winTrustData.dwStateAction=WTD_STATEACTION_CLOSE;
 	WinVerifyTrust((HWND)INVALID_HANDLE_VALUE,&policyGUID,&winTrustData);
-	if (lStatus!=ERROR_SUCCESS && lStatus!=CERT_E_EXPIRED)
+	if (lStatus!=ERROR_SUCCESS)
 		return false;
+
+	// With no configured publisher, still require a trusted Authenticode chain.
+	if (!signer || !*signer) return true;
 
 	// verify the signer name
 	CString signerName;
 
-	HCERTSTORE hStore;
-	HCRYPTMSG hMsg;
+	HCERTSTORE hStore=NULL;
+	HCRYPTMSG hMsg=NULL;
 	if (CryptQueryObject(CERT_QUERY_OBJECT_FILE,fname,CERT_QUERY_CONTENT_FLAG_ALL,CERT_QUERY_FORMAT_FLAG_ALL,0,NULL,NULL,NULL,&hStore,&hMsg,NULL) && hStore && hMsg)
 	{
 		DWORD len;
@@ -567,13 +586,9 @@ static bool VerifyDigitalCertificate( const wchar_t *fname, const wchar_t *signe
 					len=CertGetNameString(pCertContext,CERT_NAME_SIMPLE_DISPLAY_TYPE,0,NULL,NULL,0);
 					if (len>1)
 					{
-						wchar_t *buf=signerName.GetBuffer(len-1);
-						if (buf)
-						{
-							DWORD res=CertGetNameString(pCertContext,CERT_NAME_SIMPLE_DISPLAY_TYPE,0,NULL,buf,len);
-							signerName.ReleaseBufferSetLength(len-1);
-							if (!res) signerName.Empty();
-						}
+						std::vector<wchar_t> name(len);
+						if (CertGetNameString(pCertContext,CERT_NAME_SIMPLE_DISPLAY_TYPE,0,NULL,name.data(),len))
+							signerName=name.data();
 
 #ifdef UPDATE_LOG
 						LogToFile(UPDATE_LOG,L"Signer: '%s', '%s'",signer,signerName);
@@ -585,6 +600,7 @@ static bool VerifyDigitalCertificate( const wchar_t *fname, const wchar_t *signe
 						LogToFile(UPDATE_LOG,L"CertGetNameString failed");
 #endif
 					}
+					CertFreeCertificateContext(pCertContext);
 				}
 				else
 				{
@@ -606,8 +622,6 @@ static bool VerifyDigitalCertificate( const wchar_t *fname, const wchar_t *signe
 			LogToFile(UPDATE_LOG,L"CryptMsgGetParam1 failed");
 #endif
 		}
-		if (hStore) CertCloseStore(hStore,0);
-		if (hMsg) CryptMsgClose(hMsg);
 	}
 	else
 	{
@@ -615,6 +629,9 @@ static bool VerifyDigitalCertificate( const wchar_t *fname, const wchar_t *signe
 		LogToFile(UPDATE_LOG,L"CryptQueryObject failed");
 #endif
 	}
+
+	if (hStore) CertCloseStore(hStore,0);
+	if (hMsg) CryptMsgClose(hMsg);
 
 	return (signerName==signer);
 }
@@ -807,20 +824,10 @@ static DWORD WINAPI ThreadDownloadFile( void *param )
 	if (params.saveRes)
 		return 0;
 
-	// validate signer
-/*
-	if (params.signer)
-	{
-		if (params.progress)
-			params.progress->SetText(LoadStringEx(IDS_PROGRESS_VERIFY));
-		params.valid=VerifyDigitalCertificate(fname,params.signer);
-		if (!params.valid)
-		{
-			DeleteFile(fname);
-			return 0;
-		}
-	}
-*/
+	// Never accept an unsigned/untrusted installer, even when no publisher
+	// name was supplied by the release metadata.
+	params.valid=VerifyDigitalCertificate(fname,params.signer);
+	if (!params.valid) DeleteFile(fname);
 	return 0;
 }
 

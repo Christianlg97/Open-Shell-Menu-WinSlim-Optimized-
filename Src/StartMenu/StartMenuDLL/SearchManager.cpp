@@ -4,6 +4,7 @@
 
 #include "stdafx.h"
 #include "SearchManager.h"
+#include "RustCore.h"
 #include "MenuContainer.h"
 #include "MetroLinkManager.h"
 #include "Settings.h"
@@ -17,6 +18,9 @@
 #include <searchapi.h>
 #include <ntquery.h>
 #include <algorithm>
+#include <map>
+#include <set>
+#include <string>
 
 // attempt to get more accurate PIDLs for the search results by laundering them through a search folder.
 // this produces better search items for the CSC search connector (better icons and behavior) but is slow.
@@ -68,10 +72,16 @@ void CSearchManager::Close( void )
 {
 	if (!m_bInitialized) return;
 	SetEvent(m_ExitEvent);
-	WaitForMultipleObjects(_countof(m_SearchThreads),m_SearchThreads,TRUE,INFINITE);
-	CloseHandle(m_SearchEvent);
 	for (int i=0;i<_countof(m_SearchThreads);i++)
+	{
+		if (!m_SearchThreads[i]) continue;
+		WaitForSingleObject(m_SearchThreads[i],INFINITE);
 		CloseHandle(m_SearchThreads[i]);
+		m_SearchThreads[i]=NULL;
+	}
+	if (m_SearchEvent) CloseHandle(m_SearchEvent);
+	if (m_ExitEvent) CloseHandle(m_ExitEvent);
+	m_SearchEvent=m_ExitEvent=NULL;
 	for (int i=0;i<LOCK_COUNT;i++)
 		DeleteCriticalSection(&m_CriticalSections[i]);
 	m_bInitialized=false;
@@ -1372,128 +1382,81 @@ void CSearchManager::GetSearchResults( SearchResults &results )
 	results.metrosettings.clear();
 	results.indexed.clear();
 	results.autocomplete.clear();
-	results.autoCompletePath.Empty();
-	Lock lock(this,LOCK_DATA);
-	results.autoCompletePath=m_AutoCompletePath;
-	bool bSearchSubWord=GetSettingBool(L"SearchSubWord");
-	if (m_AutoCompletePath.IsEmpty())
+	std::vector<SearchItem> programs, settings, autocomplete;
+	CString searchText;
 	{
+		// Snapshot owned data. Shell/AppID lookups below may pump messages and must
+		// never run under LOCK_DATA or retain references into the worker's vectors.
+		Lock lock(this,LOCK_DATA);
+		searchText=m_SearchText;
+		results.autoCompletePath=m_AutoCompletePath;
+		results.bSearching=(m_LastCompletedId!=m_LastRequestId);
+		if (m_AutoCompletePath.IsEmpty())
 		{
-			std::vector<SearchItem> &programs=m_bProgramsFound?m_ProgramItems:m_ProgramItemsOld;
-			std::sort(programs.begin(),programs.end());
-			std::vector<const SearchItem*> foundItems;
-			for (std::vector<SearchItem>::const_iterator it=programs.begin();it!=programs.end();++it)
-			{
-				if (it->category==CATEGORY_PROGRAM && it->MatchText(m_SearchText,bSearchSubWord))
-				{
-					bool bDuplicate=false;
-					bool bAppResolved=false;
-					for (std::vector<const SearchItem*>::const_iterator it2=foundItems.begin();it2!=foundItems.end();++it2)
-					{
-						if (wcscmp(it->name,(*it2)->name)==0 && it->bMetroLink==(*it2)->bMetroLink)
-						{
-							if (!bAppResolved)
-							{
-								bAppResolved=true;
-								g_ItemManager.UpdateItemInfo(it->pInfo,CItemManager::INFO_LINK_APPID);
-							}
-							g_ItemManager.UpdateItemInfo((*it2)->pInfo,CItemManager::INFO_LINK_APPID);
-							CItemManager::RWLock lock(&g_ItemManager,false,CItemManager::RWLOCK_ITEMS);
-							if (it->pInfo->GetAppid()==(*it2)->pInfo->GetAppid())
-							{
-								bDuplicate=true;
-								break;
-							}
-						}
-					}
-					if (!bDuplicate)
-					{
-						results.programs.push_back(it->pInfo);
-						foundItems.push_back(&*it);
-					}
-				}
-			}
+			programs=m_bProgramsFound?m_ProgramItems:m_ProgramItemsOld;
+			settings=m_bSettingsFound?m_SettingsItems:m_SettingsItemsOld;
+			results.indexed=m_IndexedItems;
 		}
-
+		else
+			autocomplete=m_AutoCompleteItems;
+	}
+	bool bSearchSubWord=GetSettingBool(L"SearchSubWord");
+	if (results.autoCompletePath.IsEmpty())
+	{
+		std::sort(programs.begin(),programs.end());
+		results.programs.reserve(programs.size());
+		struct NameGroup
 		{
-			std::vector<SearchItem> &settings=m_bSettingsFound?m_SettingsItems:m_SettingsItemsOld;
-			for (std::vector<SearchItem>::iterator it=settings.begin();it!=settings.end();++it)
+			const CItemManager::ItemInfo *first;
+			std::set<std::wstring> appIds;
+		};
+		std::map<std::pair<std::wstring,bool>,NameGroup> groups;
+		auto ResolveAppId=[](const CItemManager::ItemInfo *info) -> std::wstring
+		{
+			g_ItemManager.UpdateItemInfo(info,CItemManager::INFO_LINK_APPID);
+			CItemManager::RWLock lock(&g_ItemManager,false,CItemManager::RWLOCK_ITEMS);
+			return std::wstring(info->GetAppid());
+		};
+		for (const auto &item:programs)
+		{
+			if (item.category!=CATEGORY_PROGRAM || !item.MatchText(searchText,bSearchSubWord)) continue;
+			auto key=std::make_pair(std::wstring(item.name),item.bMetroLink);
+			auto inserted=groups.emplace(std::move(key),NameGroup{item.pInfo,{}});
+			if (!inserted.second)
 			{
-				int match=(it->category==CATEGORY_SETTING || it->category==CATEGORY_METROSETTING)?it->MatchText(m_SearchText,bSearchSubWord):0;
-				it->rank=(it->rank&0xFFFFFFFE)|(match>>1);
+				NameGroup &group=inserted.first->second;
+				if (group.appIds.empty()) group.appIds.insert(ResolveAppId(group.first));
+				if (!group.appIds.insert(ResolveAppId(item.pInfo)).second) continue;
 			}
-			std::sort(settings.begin(),settings.end());
-			for (std::vector<SearchItem>::const_iterator it=settings.begin();it!=settings.end();++it)
-			{
-				if (it->MatchText(m_SearchText, bSearchSubWord))
-				{
-					if (it->category==CATEGORY_SETTING)
-						results.settings.push_back(it->pInfo);
-					if (it->category==CATEGORY_METROSETTING)
-						results.metrosettings.push_back(it->pInfo);
-				}
-			}
+			results.programs.push_back(item.pInfo);
 		}
-
-		results.indexed=m_IndexedItems;
+		for (auto &item:settings)
+		{
+			int match=(item.category==CATEGORY_SETTING || item.category==CATEGORY_METROSETTING)?item.MatchText(searchText,bSearchSubWord):0;
+			item.rank=(item.rank&0xFFFFFFFE)|(match>>1);
+		}
+		std::sort(settings.begin(),settings.end());
+		for (const auto &item:settings)
+		{
+			if (!item.MatchText(searchText,bSearchSubWord)) continue;
+			if (item.category==CATEGORY_SETTING) results.settings.push_back(item.pInfo);
+			if (item.category==CATEGORY_METROSETTING) results.metrosettings.push_back(item.pInfo);
+		}
 	}
 	else
 	{
-		std::sort(m_AutoCompleteItems.begin(),m_AutoCompleteItems.end());
-		Assert(_wcsnicmp(m_SearchText,m_AutoCompletePath,m_AutoCompletePath.GetLength())==0);
-		CString filter=m_SearchText.Mid(m_AutoCompletePath.GetLength()+1);
-		if (!filter.IsEmpty())
-			filter+='*';
-		for (std::vector<SearchItem>::const_iterator it=m_AutoCompleteItems.begin();it!=m_AutoCompleteItems.end();++it)
-		{
-			if (filter.IsEmpty() || PathMatchSpec(it->name,filter))
-				results.autocomplete.push_back(it->pInfo);
-		}
+		std::sort(autocomplete.begin(),autocomplete.end());
+		CString filter=searchText.Mid(results.autoCompletePath.GetLength()+1);
+		if (!filter.IsEmpty()) filter+='*';
+		for (const auto &item:autocomplete)
+			if (filter.IsEmpty() || PathMatchSpec(item.name,filter)) results.autocomplete.push_back(item.pInfo);
 	}
 	results.bResults=(!results.programs.empty() || !results.settings.empty() || !results.metrosettings.empty() || !results.indexed.empty() || !results.autocomplete.empty());
-	results.bSearching=(m_LastCompletedId!=m_LastRequestId);
 }
 
 bool CSearchManager::SearchItem::MatchTextInt( const wchar_t *search, const CString &text, bool bSearchSubWord )
 {
-	if (text.IsEmpty()) return false;
-	if (bSearchSubWord)
-	{
-		// split search into tokens and see if all are found
-		for (const wchar_t *pSearch=search;*pSearch;)
-		{
-			wchar_t token[100];
-			pSearch=GetToken(pSearch,token,_countof(token),L" ");
-			if (FindNLSStringEx(LOCALE_NAME_USER_DEFAULT,FIND_FROMSTART|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC,text,-1,token,-1,NULL,NULL,NULL,0)<0)
-				return false;
-		}
-	}
-	else
-	{
-		// split search into tokens, then see if any of the words start with those tokens
-		for (const wchar_t *pSearch=search;*pSearch;)
-		{
-			wchar_t token[100];
-			pSearch=GetToken(pSearch,token,_countof(token),L" ");
-			bool bFound=false;
-			int len=Strlen(token);
-			for (const wchar_t *pName=text;*pName;)
-			{
-				while (*pName && wcschr(L" \t.,$&[]{}();|",*pName))
-					pName++;
-				if (FindNLSStringEx(LOCALE_NAME_USER_DEFAULT,FIND_STARTSWITH|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC,pName,-1,token,len,NULL,NULL,NULL,0)>=0)
-				{
-					bFound=true;
-					break;
-				}
-				while (*pName && !wcschr(L" \t.,$&[]{}();|",*pName))
-					pName++;
-			}
-			if (!bFound)
-				return false;
-		}
-	}
-	return true;
+	return WinSlimMatchText(search,wcslen(search),text,text.GetLength(),bSearchSubWord?1:0)!=0;
 }
 
 void CSearchManager::LaunchExternalSearch( PIDLIST_ABSOLUTE root, unsigned int categoryHash, const CString &searchText )

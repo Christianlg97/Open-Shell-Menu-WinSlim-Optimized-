@@ -24,51 +24,81 @@
 #include <propvarutil.h>
 #include <algorithm>
 #include <propkey.h>
-#include <thread>
+#include <new>
 
-// Execute function on a separate STA thread while pumping messages on caller thread.
-template <typename TFunc>
-static auto ExecuteOnSTAThread(TFunc&& func) -> decltype(func())
+// Requests own their PIDLs and pin this DLL until their STA has finished.
+// Never transfer IContextMenu or a menu/window reference to the worker.
+struct OpenFolderRequest
 {
-	using ReturnType = decltype(func());
-	ReturnType result{};
+	CAbsolutePidl item;
+	bool resolveShortcut;
+	HMODULE module;
+};
 
-	std::thread worker([&func, &result]() mutable {
-		CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-		result = func();
-		CoUninitialize();
-	});
-
-	// Pump messages while waiting for the worker (dialog) to finish
-	while (true)
+static DWORD WINAPI OpenFolderWorker( void *param )
+{
+	OpenFolderRequest *request=(OpenFolderRequest*)param;
+	HMODULE module=request->module;
+	HRESULT initialized=CoInitializeEx(NULL,COINIT_APARTMENTTHREADED);
+	HRESULT result=initialized;
+	ULONGLONG started=GetTickCount64();
+	if (SUCCEEDED(initialized))
 	{
-		HANDLE hWorker = worker.native_handle();
-		if (MsgWaitForMultipleObjects(1, &hWorker, FALSE, INFINITE, QS_ALLINPUT) == WAIT_OBJECT_0)
-			break;
-
-		MSG msg;
-		while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
 		{
-			if (msg.message == WM_QUIT)
+			CAbsolutePidl target;
+			PCIDLIST_ABSOLUTE selected=request->item;
+			if (request->resolveShortcut)
 			{
-				PostQuitMessage((int)msg.wParam);
-				break;
+				CComPtr<IShellItem> item;
+				SFGAOF attributes=0;
+				result=SHCreateItemFromIDList(selected,IID_PPV_ARGS(&item));
+				if (SUCCEEDED(result)) result=item->GetAttributes(SFGAO_LINK,&attributes);
+				if (SUCCEEDED(result) && (attributes&SFGAO_LINK))
+				{
+					CComPtr<IShellLink> link;
+					result=item->BindToHandler(NULL,BHID_SFUIObject,IID_PPV_ARGS(&link));
+					if (SUCCEEDED(result)) result=link->GetIDList(&target);
+					if (SUCCEEDED(result) && target) selected=target;
+					else result=E_FAIL; // do not silently open the shortcut's folder
+				}
 			}
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
-		}
+			else
+				result=S_OK;
+			TraceInteraction(TRACE_SHELL_RESOLVED,NULL,0,(WPARAM)result,(LPARAM)(GetTickCount64()-started));
+			if (SUCCEEDED(result)) result=SHOpenFolderAndSelectItems(selected,0,NULL,0);
+		} // release all COM objects before uninitializing this STA
+		CoUninitialize();
 	}
-	worker.join();
-
-	return result;
+	TraceInteraction(TRACE_SHELL_COMPLETED,NULL,0,(WPARAM)result,(LPARAM)(GetTickCount64()-started));
+	QueueInteractionTraceFlush();
+	delete request;
+	FreeLibraryAndExitThread(module,(DWORD)result);
+	return 0;
 }
 
-// Wrapper for SHOpenFolderAndSelectItems that runs on separate STA thread and pumps messages
-static HRESULT SHOpenFolderAndSelectItemsSafe(PCIDLIST_ABSOLUTE pidlFolder, UINT cidl, PCUITEMID_CHILD_ARRAY apidl, DWORD dwFlags)
+static HRESULT QueueOpenFolder( PCIDLIST_ABSOLUTE item, bool resolveShortcut )
 {
-	return ExecuteOnSTAThread([=]() {
-		return SHOpenFolderAndSelectItems(pidlFolder, cidl, apidl, dwFlags);
-	});
+	if (!item) return E_INVALIDARG;
+	OpenFolderRequest *request=new(std::nothrow) OpenFolderRequest;
+	if (!request) return E_OUTOFMEMORY;
+	request->item.Clone(item);
+	request->resolveShortcut=resolveShortcut;
+	if (!request->item) { delete request; return E_OUTOFMEMORY; }
+	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCWSTR)&OpenFolderWorker,&request->module))
+	{
+		delete request;
+		return E_FAIL;
+	}
+	HANDLE worker=CreateThread(NULL,0,OpenFolderWorker,request,0,NULL);
+	if (!worker)
+	{
+		FreeLibrary(request->module);
+		delete request;
+		return E_FAIL;
+	}
+	CloseHandle(worker);
+	TraceInteraction(TRACE_SHELL_QUEUED,NULL,0,resolveShortcut,0);
+	return S_OK;
 }
 
 static CString g_RenameText;
@@ -1428,11 +1458,15 @@ static HRESULT CreatePinLink( PCIDLIST_ABSOLUTE sourcePidl, const wchar_t *name,
 static CString GetContextMenuItemVerb(IContextMenu* pContextMenu, UINT_PTR uId)
 {
 	wchar_t verbW[256] = {};
-	if (SUCCEEDED(pContextMenu->GetCommandString(uId, GCS_VERBW, nullptr, reinterpret_cast<char*>(verbW), sizeof(verbW))))
+	HRESULT result=pContextMenu->GetCommandString(uId,GCS_VERBW,nullptr,reinterpret_cast<char*>(verbW),_countof(verbW));
+	verbW[_countof(verbW)-1]=0;
+	if (SUCCEEDED(result) && verbW[0])
 		return CString(verbW);
 
 	char verbA[256] = {};
-	if (SUCCEEDED(pContextMenu->GetCommandString(uId, GCS_VERBA, nullptr, verbA, sizeof(verbA))))
+	result=pContextMenu->GetCommandString(uId,GCS_VERBA,nullptr,verbA,_countof(verbA));
+	verbA[_countof(verbA)-1]=0;
+	if (SUCCEEDED(result) && verbA[0])
 		return CString(verbA);
 
 	return {};
@@ -2930,7 +2964,8 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 		}
 		else
 		{
-			SHOpenFolderAndSelectItemsSafe(pItemPidl1,0,NULL,0);
+			QueueOpenFolder(pItemPidl1,false);
+			CloseSubMenus(CLOSE_POST,NULL);
 		}
 		res=0;
 	}
@@ -2952,9 +2987,24 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 	if (res>=CMD_LAST)
 	{
 		// handle special verbs
-		char command[256];
-		if (FAILED(pMenu->GetCommandString(res-CMD_LAST,GCS_VERBA,NULL,command,_countof(command))))
+		char command[256]={};
+		IContextMenu *selectedMenu=pSecondaryMenu && res>=secondaryCmd?pSecondaryMenu.p:pMenu.p;
+		int selectedOffset=pSecondaryMenu && res>=secondaryCmd?secondaryCmd:CMD_LAST;
+		if (FAILED(selectedMenu->GetCommandString(res-selectedOffset,GCS_VERBA,NULL,command,_countof(command))))
 			command[0]=0;
+		command[_countof(command)-1]=0;
+		CString selectedVerb=GetContextMenuItemVerb(selectedMenu,res-selectedOffset);
+		if (_stricmp(command,"opencontaining")==0 || selectedVerb.CompareNoCase(L"opencontaining")==0)
+		{
+			HRESULT queued=QueueOpenFolder(pItemPidl1,true);
+			if (SUCCEEDED(queued)) CloseSubMenus(CLOSE_POST,NULL);
+			LOG_MENU(LOG_EXECUTE,L"Queue open location, res=%08X",queued);
+			DestroyMenu(menu);
+			s_HotPos=GetMessagePos();
+			if (pData) pData->command=0;
+			guard.Disarm();
+			return;
+		}
 		if (_stricmp(command,"rename")==0)
 		{
 			// show the Rename dialog box
@@ -3172,15 +3222,9 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 			}
 			else
 			{
-				HRESULT hr{};
-				auto verb = GetContextMenuItemVerb(pInvokeMenu, (UINT_PTR)info.lpVerbW);
-				// "opencontaining" may block the UI thread on recent Windows 11 versions.
-				// Use the shell API on a worker STA for that operation, without passing
-				// the apartment-bound IContextMenu interface to another thread.
-				if (verb.CompareNoCase(L"opencontaining") == 0)
-					hr = SHOpenFolderAndSelectItemsSafe(pItemPidl1, 0, NULL, 0);
-				else
-					hr = pInvokeMenu->InvokeCommand((LPCMINVOKECOMMANDINFO)&info);
+				// Apartment-bound handlers stay on their creating thread. Slow location
+				// requests were already queued above, before disabling menu windows.
+				HRESULT hr=pInvokeMenu->InvokeCommand((LPCMINVOKECOMMANDINFO)&info);
 				LOG_MENU(LOG_EXECUTE,L"Invoke command, ptr=%p, res=%d",this,hr);
 				executeSuccess=SUCCEEDED(hr);
 			}

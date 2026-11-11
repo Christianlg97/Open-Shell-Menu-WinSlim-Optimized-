@@ -360,3 +360,6 @@ Src/Setup/Temp/
 *.zip
 *.bin
 *.chm
+
+# Rust regression/build outputs
+Src/RustCore/target/

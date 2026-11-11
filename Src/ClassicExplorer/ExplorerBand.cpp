@@ -1709,7 +1709,7 @@ LRESULT CBandWindow::OnDropDown( int idCtrl, LPNMHDR pnmh, BOOL& bHandled )
 
 						CComString pFavs;
 						SHGetKnownFolderPath(FOLDERID_Favorites,0,NULL,&pFavs);
-						if (pFavs && SUCCEEDED(SHGetPathFromIDList(pidl,buf)))
+						if (pFavs && SHGetPathFromIDList(pidl,buf))
 						{
 							// must compare strings and not pidls. sometimes pidls can be different but point to the same folder
 							pFavs.MakeUpper();

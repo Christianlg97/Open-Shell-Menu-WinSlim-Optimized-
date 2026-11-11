@@ -71,6 +71,9 @@
     <ClInclude Include="ResourceHelper.h">
       <Filter>Resources</Filter>
     </ClInclude>
+    <ClInclude Include="RustCore.h">
+      <Filter>Lib</Filter>
+    </ClInclude>
     <ClInclude Include="TrackResources.h">
       <Filter>Resources</Filter>
     </ClInclude>

@@ -3,6 +3,8 @@
 
 # Open-Shell
 
+WinSlim build instructions and implementation notes: [WINSLIM_CHANGES.md](WINSLIM_CHANGES.md).
+
 A collection of utilities bringing back classic features to Windows.
 
 *Originally* **[Classic Shell](http://www.classicshell.net)** *by [Ivo Beltchev](https://sourceforge.net/u/ibeltchev/profile/)*
