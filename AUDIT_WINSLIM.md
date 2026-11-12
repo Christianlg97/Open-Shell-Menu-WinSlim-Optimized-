@@ -1,5 +1,26 @@
 # Revisión del código — 12 de noviembre de 2026
 
+## Segunda revisión (mismo día)
+
+Se compararon todos los cambios de WinSlim con Open-Shell original y se revisaron
+las rutas que se ejecutan en cada movimiento del ratón. Los cambios de WinSlim
+estaban bien; los fallos corregidos vienen del código heredado:
+
+| Problema | Cambio |
+|---|---|
+| `PointAroundStartButton` llamaba a `SHAppBarMessage` en cada movimiento del ratón sobre la barra (hook de ratón, subclase de la barra y temporizador de 30 ms del botón) | El borde se guarda por barra en `TaskbarInfo` y solo se vuelve a consultar si cambia el rectángulo de la barra. |
+| La lectura de ajustes recorría unos 380 elementos comparando nombres en cada llamada | Índice hash por tipo, creado una vez en `CSettingsManager::Init`; conserva el mismo resultado y el recorrido lineal como respaldo. |
+| El Escritorio y las carpetas de un nivel se vigilaban con todo su subárbol | Solo se vigila el subárbol donde se recorre en profundidad (menú Inicio y apps modernas). Escribir en subcarpetas del Escritorio ya no despierta el hilo ni vuelve a recorrer el Escritorio. |
+| `GetStartScreenIcon` (Windows 8) esperaba 100 ms y el otro hilo podía escribir después en su pila | Petición en memoria dinámica con dos referencias; la última libera el bitmap y el evento. También comprueba el fallo de `CreateDIBSection`. |
+| Cinco `CreateThread` descartaban el identificador del hilo; el fundido lo hacía en cada lanzamiento | Se cierran los identificadores; si falla la creación se liberan los parámetros. |
+| `CMenuFader::s_Faders` se modificaba desde varios hilos sin bloqueo, un fundido sin ventana dejaba su hilo esperando para siempre y `ClearAll` podía repetir sin fin `SendMessage` a un `HWND` nulo | `SRWLOCK` para la lista, limpieza si no se crea la ventana y la región se libera si `SetWindowRgn` falla. |
+
+`tools/verify.py` añade una regresión por cada punto. No se ha compilado ni
+ejecutado el binario nuevo. Para instalar encima de 4.4.1004 hay que compilar con
+otra versión (`-Version 4.4.1005`).
+
+## Primera revisión
+
 El menú tiene ahora mejores límites de caché, menos trabajo del Shell dentro de
 bloqueos y búsquedas sin la deduplicación cuadrática anterior. Eso es una mejora
 de implementación; faltan mediciones del ejecutable final para afirmar un ahorro

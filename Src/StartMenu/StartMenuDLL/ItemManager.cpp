@@ -2938,7 +2938,11 @@ void CItemManager::PreloadItemsThread( void )
 			wchar_t path[_MAX_PATH];
 			if (i<NUM_WATCHED_DIRS && dirMask==0xFFFFFFFF && SHGetPathFromIDList(pidl,path))
 			{
-				handles[dirCount]=FindFirstChangeNotification(path,TRUE,FILE_NOTIFY_CHANGE_FILE_NAME|FILE_NOTIFY_CHANGE_DIR_NAME|FILE_NOTIFY_CHANGE_LAST_WRITE);
+				// Folders read one level deep only need their own entries watched. Watching the
+				// whole subtree woke this thread and rescanned the desktop for every file written
+				// in desktop subfolders (projects, downloads). Metro app links live in subfolders.
+				BOOL bSubtree=(g_CacheFolders[i].levels>1 || g_CacheFolders[i].folder==FOLDERID_MetroApps);
+				handles[dirCount]=FindFirstChangeNotification(path,bSubtree,FILE_NOTIFY_CHANGE_FILE_NAME|FILE_NOTIFY_CHANGE_DIR_NAME|FILE_NOTIFY_CHANGE_LAST_WRITE);
 				if (handles[dirCount]!=INVALID_HANDLE_VALUE)
 				{
 					dirMasks[dirCount]=1<<i;

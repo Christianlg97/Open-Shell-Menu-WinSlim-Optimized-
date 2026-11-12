@@ -133,6 +133,62 @@ class SourceRegressions(unittest.TestCase):
         self.assertNotIn("m_LastCacheSave=0", throttle)
         self.assertIn("CACHE_SAVE_INTERVAL-CACHE_RETRY_INTERVAL", throttle)
 
+    def test_detached_threads_close_their_handles(self):
+        # A discarded CreateThread handle keeps a thread object alive in Explorer.
+        for path in (ROOT / "Src/StartMenu").rglob("*.cpp"):
+            for number, line in enumerate(path.read_text(encoding="utf-8-sig", errors="replace").splitlines(), 1):
+                with self.subTest(path=path.name, line=number):
+                    self.assertNotRegex(line, r"^\s*CreateThread\(")
+
+    def test_start_screen_thumbnail_request_outlives_timeout(self):
+        text = source("Src/StartMenu/StartMenuDLL/StartMenuDLL.cpp")
+        icon = function_body(text, "HBITMAP GetStartScreenIcon(", "STARTMENUAPI LRESULT CALLBACK HookInject(")
+        self.assertNotIn("(LPARAM)&info", icon)
+        self.assertIn("pRequest->refCount=2;", icon)
+        self.assertIn("ReleaseStartScreenThumbInfo(pRequest);", icon)
+        self.assertIn("if (!bitmap || !bits)", icon)
+        hook = function_body(text, "static LRESULT CALLBACK HookAppManager(", "static LRESULT CALLBACK HookNewWindow(")
+        self.assertIn("ReleaseStartScreenThumbInfo(pInfo);", hook)
+
+    def test_taskbar_edge_is_cached_for_mouse_hooks(self):
+        text = source("Src/StartMenu/StartMenuDLL/StartMenuDLL.cpp")
+        hit = function_body(text, "bool PointAroundStartButton(", "// declare few interfaces")
+        self.assertEqual(hit.count("GetTaskbarPosition("), 1)
+        self.assertIn("!EqualRect(&taskBar->edgeRect,&rc)", hit)
+        self.assertIn("edge=0xFFFFFFFF", source("Src/StartMenu/StartMenuDLL/StartMenuDLL.h"))
+
+    def test_settings_getters_use_the_index(self):
+        text = source("Src/Lib/Settings.cpp")
+        init = function_body(text, "void CSettingsManager::Init(", "CSettingsManager::~CSettingsManager(")
+        self.assertLess(init.index("BuildLookup();"), init.index("LoadSettings(false);"))
+        getters = function_body(text, "bool CSettingsManager::GetSettingBool( const wchar_t *name ) const", "static bool OpenSettingsKeys(")
+        self.assertNotIn("for (", getters)
+        self.assertEqual(getters.count("LookupSetting(LOOKUP_"), 5)
+        # The index must reproduce the linear scan: unique ASCII names per getter type.
+        table = source("Src/StartMenu/StartMenuDLL/SettingsUI.cpp")
+        table = table[table.index("CSetting g_Settings[]"):]
+        classes = {"TYPE_BOOL": 0, "TYPE_INT": 1, "TYPE_HOTKEY": 1, "TYPE_HOTKEY_ANY": 1, "TYPE_COLOR": 1}
+        keys = [(name.lower(), classes.get(kind, 2)) for name, kind in re.findall(r'\{L"([^"]+)",CSetting::(TYPE_\w+)', table[:table.index("{NULL}")])
+                if kind not in ("TYPE_GROUP", "TYPE_RADIO")]
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertTrue(all(name.isascii() for name, _ in keys))
+
+    def test_one_level_folders_do_not_watch_their_subtree(self):
+        text = source("Src/StartMenu/StartMenuDLL/ItemManager.cpp")
+        preload = function_body(text, "void CItemManager::PreloadItemsThread(", "DWORD CALLBACK CItemManager::StaticPreloadItemsThread(")
+        self.assertNotIn("FindFirstChangeNotification(path,TRUE,", preload)
+        self.assertIn("g_CacheFolders[i].levels>1 || g_CacheFolders[i].folder==FOLDERID_MetroApps", preload)
+
+    def test_fader_list_is_locked(self):
+        text = source("Src/StartMenu/StartMenuDLL/MenuCommands.cpp")
+        fader = text[text.index("CMenuFader::CMenuFader("):text.index("LRESULT CMenuFader::OnEraseBkgnd(")]
+        self.assertEqual(fader.count("AcquireSRWLockExclusive(&g_FaderLock);"), 2)
+        clear = function_body(text, "void CMenuFader::ClearAll(", "\n}\n")
+        self.assertIn("AcquireSRWLockShared(&g_FaderLock);", clear)
+        self.assertNotIn("s_Faders[0]->SendMessage", clear)
+        thread = function_body(text, "static DWORD WINAPI FaderThreadProc(", "void CMenuContainer::FadeOutItem(")
+        self.assertIn("if (!pFader->m_hWnd)", thread)
+
     def test_removed_modules_are_not_built_or_installed(self):
         for folder in ("ClassicExplorer", "ClassicIE", "Update", "WinSlimDarkMode"):
             self.assertFalse(list((ROOT / "Src" / folder).rglob("*.cpp")))

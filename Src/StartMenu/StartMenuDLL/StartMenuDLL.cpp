@@ -21,6 +21,7 @@
 #include <htmlhelp.h>
 #include <dbghelp.h>
 #include <set>
+#include <new>
 #include <Thumbcache.h>
 #include <tlhelp32.h>
 
@@ -268,12 +269,25 @@ static const GUID SID_IImmersiveMonitorService={0x47094e3a,0x0cf2,0x430f,{0x80,0
 static const GUID IID_IImmersiveMonitorService={0x4d4c1e64,0xe410,0x4faa,{0xba,0xfa,0x59,0xca,0x06,0x9b,0xfe,0xc2}};
 
 
+// Heap-allocated and shared by the requester and the app manager thread. The requester
+// stops waiting after a timeout, so the last of the two references frees the request.
 struct StartScreenThumbInfo
 {
 	SIZE size;
 	HBITMAP bitmap;
 	HANDLE event;
+	LONG refCount; // only changed with Interlocked functions
 };
+
+static void ReleaseStartScreenThumbInfo( StartScreenThumbInfo *pInfo )
+{
+	if (InterlockedDecrement(&pInfo->refCount)==0)
+	{
+		if (pInfo->bitmap) DeleteObject(pInfo->bitmap);
+		if (pInfo->event) CloseHandle(pInfo->event);
+		delete pInfo;
+	}
+}
 
 static bool CreateImmersiveShell( CComPtr<IUnknown> &ptr )
 {
@@ -682,12 +696,22 @@ UINT GetTaskbarPosition( HWND taskBar, MONITORINFO *pInfo, HMONITOR *pMonitor, R
 // Returns true if the mouse is on the taskbar portion of the start button
 bool PointAroundStartButton( size_t taskbarId, const CPoint &pt )
 {
-	const TaskbarInfo *taskBar=GetTaskbarInfo(taskbarId);
+	TaskbarInfo *taskBar=GetTaskbarInfo(taskbarId);
 	if (!taskBar || !(taskBar->startButton || taskBar->oldButton)) return false;
 	CRect rc;
 	GetWindowRect(taskBar->taskBar,&rc);
 	if (!PtInRect(&rc,pt))
 		return false;
+
+	// This runs from the mouse hooks and the hover timer on every mouse move over the
+	// taskbar. The edge can only change when the taskbar moves or resizes, so query it
+	// (SHAppBarMessage: shared memory and a message to the tray) only in that case.
+	if (taskBar->edge==0xFFFFFFFF || !EqualRect(&taskBar->edgeRect,&rc))
+	{
+		taskBar->edge=GetTaskbarPosition(taskBar->taskBar,NULL,NULL,NULL);
+		taskBar->edgeRect=rc;
+	}
+	UINT uEdge=taskBar->edge;
 
 	bool rtl=GetWindowLongPtr(taskBar->taskBar,GWL_EXSTYLE)&WS_EX_LAYOUTRTL;
 
@@ -715,7 +739,6 @@ bool PointAroundStartButton( size_t taskbarId, const CPoint &pt )
 	rc.UnionRect(&rcStart,&rcOld);
 
 	// check if the point is inside the start button rect
-	UINT uEdge=GetTaskbarPosition(taskBar->taskBar,NULL,NULL,NULL);
 	if (uEdge==ABE_LEFT || uEdge==ABE_RIGHT)
 		return pt.y>=rc.top && pt.y<rc.bottom;
 	else if (rtl)
@@ -1035,8 +1058,9 @@ static LRESULT CALLBACK HookAppManager( int code, WPARAM wParam, LPARAM lParam )
 			if (msg->wParam==MSG_METROTHUMBNAIL)
 			{
 				// set the event no matter if successful
-				StartScreenThumbInfo &info=*(StartScreenThumbInfo*)msg->lParam;
-				SetEvent(info.event);
+				StartScreenThumbInfo *pInfo=(StartScreenThumbInfo*)msg->lParam;
+				SetEvent(pInfo->event);
+				ReleaseStartScreenThumbInfo(pInfo); // the requester may have timed out already
 			}
 		}
 		int corner;
@@ -3411,7 +3435,8 @@ if (!g_bTrimHooks)
 
 	// we need to unload the DLL here. but we can't just call FreeLibrary because it will unload the code
 	// while it is still executing. So we create a separate thread and use FreeLibraryAndExitThread
-	CreateThread(NULL,0,ExitThreadProc,(void*)hwnd,0,NULL);
+	HANDLE thread=CreateThread(NULL,0,ExitThreadProc,(void*)hwnd,0,NULL);
+	if (thread) CloseHandle(thread);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -4345,10 +4370,27 @@ HBITMAP GetStartScreenIcon( int size )
 	info.size.cy=info.size.cx;
 	if (size>=32 && g_AppManagerThread && GetWinVersion()==WIN_VER_WIN8)
 	{
-		info.event=CreateEvent(NULL,TRUE,FALSE,NULL);
-		PostThreadMessage(g_AppManagerThread,g_StartMenuMsg,MSG_METROTHUMBNAIL,(LPARAM)&info);
-		WaitForSingleObject(info.event,100); // if it takes more than 100ms, screw it
-		CloseHandle(info.event);
+		// The app manager thread may answer after the timeout, so it must never write
+		// into this stack frame. It shares a heap request and releases its reference.
+		StartScreenThumbInfo *pRequest=new(std::nothrow) StartScreenThumbInfo();
+		if (pRequest)
+		{
+			pRequest->size=info.size;
+			pRequest->refCount=2;
+			pRequest->event=CreateEvent(NULL,TRUE,FALSE,NULL);
+			if (pRequest->event && PostThreadMessage(g_AppManagerThread,g_StartMenuMsg,MSG_METROTHUMBNAIL,(LPARAM)pRequest))
+			{
+				if (WaitForSingleObject(pRequest->event,100)==WAIT_OBJECT_0) // if it takes more than 100ms, screw it
+				{
+					// the bitmap is complete once the event is set; take ownership of it
+					info.bitmap=pRequest->bitmap;
+					pRequest->bitmap=NULL;
+				}
+			}
+			else
+				pRequest->refCount=1; // the request never reached the app manager thread
+			ReleaseStartScreenThumbInfo(pRequest);
+		}
 	}
 	info.size.cy=info.size.cx*3/4;
 
@@ -4359,8 +4401,16 @@ HBITMAP GetStartScreenIcon( int size )
 	bi.bmiHeader.biBitCount=32;
 
 	HDC hDst=CreateCompatibleDC(NULL);
-	unsigned int *bits;
-	HBITMAP bitmap=CreateDIBSection(hDst,&bi,DIB_RGB_COLORS,(void**)&bits,NULL,0);
+	unsigned int *bits=NULL;
+	HBITMAP bitmap=hDst?CreateDIBSection(hDst,&bi,DIB_RGB_COLORS,(void**)&bits,NULL,0):NULL;
+	if (!bitmap || !bits)
+	{
+		// out of GDI resources: the caller keeps the default icon
+		if (bitmap) DeleteObject(bitmap);
+		if (hDst) DeleteDC(hDst);
+		if (info.bitmap) DeleteObject(info.bitmap);
+		return NULL;
+	}
 	HGDIOBJ bmp0=SelectObject(hDst,bitmap);
 	RECT rc={0,size/8,size,size*7/8};
 

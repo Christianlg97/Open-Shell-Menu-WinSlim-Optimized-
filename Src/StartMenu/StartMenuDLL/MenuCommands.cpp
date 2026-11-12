@@ -240,7 +240,12 @@ void CMenuContainer::ExecuteCommand( const wchar_t *command, bool bElevated, boo
 	}
 	else
 	{
-		CreateThread(NULL,0,ExecuteCommandThread,_wcsdup(command),0,NULL);
+		wchar_t *param=_wcsdup(command);
+		HANDLE thread=param?CreateThread(NULL,0,ExecuteCommandThread,param,0,NULL):NULL;
+		if (thread)
+			CloseHandle(thread); // the thread runs detached; keeping the handle leaks a kernel object per command
+		else
+			free(param);
 	}
 }
 
@@ -1233,7 +1238,10 @@ static bool ExecuteSysCommand( TMenuID menuCommand )
 				Sleep(250);
 			}
 			if (!ConnectedStandby())
-				CreateThread(NULL,0,SleepThread,(void*)FALSE,0,NULL);
+			{
+				HANDLE thread=CreateThread(NULL,0,SleepThread,(void*)FALSE,0,NULL);
+				if (thread) CloseHandle(thread);
+			}
 			return true;
 
 		case MENU_HIBERNATE:
@@ -1242,7 +1250,10 @@ static bool ExecuteSysCommand( TMenuID menuCommand )
 				WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE,WTS_CURRENT_SESSION,FALSE);
 				Sleep(250);
 			}
-			CreateThread(NULL,0,SleepThread,(void*)TRUE,0,NULL);
+			{
+				HANDLE thread=CreateThread(NULL,0,SleepThread,(void*)TRUE,0,NULL);
+				if (thread) CloseHandle(thread);
+			}
 			return true;
 
 		case MENU_DISCONNECT: // disconnect the current Terminal Services session (remote desktop)
@@ -2917,7 +2928,14 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 				memcpy(pParams->target,target,sizeof(target));
 				memcpy(pParams->temp,temp,sizeof(temp));
 				memcpy(pParams->fname,fname,sizeof(fname));
-				CreateThread(NULL,0,NewShortcutThread,pParams,0,NULL);
+				HANDLE thread=CreateThread(NULL,0,NewShortcutThread,pParams,0,NULL);
+				if (thread)
+					CloseHandle(thread);
+				else
+				{
+					DeleteFile(fname);
+					delete pParams;
+				}
 			}
 		}
 		res=0;
@@ -3405,9 +3423,20 @@ void CMenuContainer::RunUserCommand( bool bPicture )
 		ExecuteCommand(command,false,true);
 }
 
+// CMenuFader::s_Faders is changed by the menu thread (constructor) and by each fader
+// thread (destructor), so every access goes through this lock.
+static SRWLOCK g_FaderLock=SRWLOCK_INIT;
+
 static DWORD WINAPI FaderThreadProc( void *param )
 {
-	((CMenuFader*)param)->Create();
+	CMenuFader *pFader=(CMenuFader*)param;
+	pFader->Create();
+	if (!pFader->m_hWnd)
+	{
+		// no window means no OnFinalMessage and no WM_QUIT: clean up instead of waiting forever
+		delete pFader;
+		return 0;
+	}
 	MSG msg;
 	while (GetMessage(&msg,NULL,0,0))
 	{
@@ -3540,7 +3569,11 @@ void CMenuContainer::FadeOutItem( int index )
 	if (bmp)
 	{
 		CMenuFader *pFader=new CMenuFader(bmp,region,speed,rc);
-		CreateThread(NULL,0,FaderThreadProc,pFader,0,NULL);
+		HANDLE thread=CreateThread(NULL,0,FaderThreadProc,pFader,0,NULL);
+		if (thread)
+			CloseHandle(thread); // runs detached; keeping the handle leaks a kernel object per launch
+		else
+			delete pFader; // releases the bitmap and the region
 	}
 }
 
@@ -3552,14 +3585,20 @@ CMenuFader::CMenuFader( HBITMAP bmp, HRGN region, int duration, RECT &rect )
 	m_Region=region;
 	m_Duration=duration;
 	m_Rect=rect;
+	AcquireSRWLockExclusive(&g_FaderLock);
 	s_Faders.push_back(this);
+	ReleaseSRWLockExclusive(&g_FaderLock);
 }
 
 CMenuFader::~CMenuFader( void )
 {
 	if (m_Bitmap) DeleteObject(m_Bitmap);
 	if (m_Region) DeleteObject(m_Region);
-	s_Faders.erase(std::find(s_Faders.begin(),s_Faders.end(),this));
+	AcquireSRWLockExclusive(&g_FaderLock);
+	std::vector<CMenuFader*>::iterator it=std::find(s_Faders.begin(),s_Faders.end(),this);
+	if (it!=s_Faders.end())
+		s_Faders.erase(it);
+	ReleaseSRWLockExclusive(&g_FaderLock);
 }
 
 void CMenuFader::Create( void )
@@ -3571,12 +3610,10 @@ void CMenuFader::Create( void )
 		int q=m_Rect.left; m_Rect.left=m_Rect.right; m_Rect.right=q;
 	}
 	CWindowImpl<CMenuFader>::Create(NULL,&m_Rect,NULL,WS_POPUP,WS_EX_TOOLWINDOW|WS_EX_TOPMOST|WS_EX_LAYERED|(bRtl?WS_EX_LAYOUTRTL:0));
+	if (!m_hWnd) return; // FaderThreadProc deletes the fader
 	ShowWindow(SW_SHOWNOACTIVATE);
-	if (m_Region)
-	{
-		SetWindowRgn(m_Region);
-		m_Region=NULL;
-	}
+	if (m_Region && SetWindowRgn(m_Region))
+		m_Region=NULL; // the window owns the region now; on failure the destructor deletes it
 	SetTimer(1,20);
 	m_Time0=0;
 	m_LastTime=0;
@@ -3626,6 +3663,19 @@ LRESULT CMenuFader::OnTimer( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHan
 
 void CMenuFader::ClearAll( void )
 {
-	while (!s_Faders.empty())
-		s_Faders[0]->SendMessage(WM_CLOSE);
+	// Never hold the lock during SendMessage: the fader thread takes it in its destructor.
+	// Holding the shared lock keeps s_Faders[0] alive while its window handle is read.
+	for (;;)
+	{
+		HWND hwnd=NULL;
+		AcquireSRWLockShared(&g_FaderLock);
+		bool bEmpty=s_Faders.empty();
+		if (!bEmpty) hwnd=s_Faders[0]->m_hWnd;
+		ReleaseSRWLockShared(&g_FaderLock);
+		if (bEmpty) break;
+		if (hwnd)
+			::SendMessage(hwnd,WM_CLOSE,0,0);
+		else
+			Sleep(1); // the fader thread is still creating (or already destroying) its window
+	}
 }

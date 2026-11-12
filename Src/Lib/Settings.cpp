@@ -382,6 +382,20 @@ public:
 	const wchar_t *GetXMLName( void ) const { return m_XMLName; }
 
 private:
+	// Case-insensitive name index used by the getters, which run in hooks and while
+	// building every menu. Built once in Init, before other threads read settings, and
+	// read-only afterwards. One open-addressing table per value type keeps the first
+	// matching entry, exactly like the linear scan it replaces.
+	enum TLookupClass { LOOKUP_BOOL, LOOKUP_INT, LOOKUP_STRING, LOOKUP_COUNT };
+	struct LookupSlot
+	{
+		unsigned int hash;
+		const CSetting *pSetting;
+	};
+	std::vector<LookupSlot> m_Lookup[LOOKUP_COUNT];
+	void BuildLookup( void );
+	const CSetting *LookupSetting( TLookupClass lookup, const wchar_t *name ) const;
+
 	CSetting *m_pSettings;
 	ICustomSettings *m_pCustom;
 	int m_SettingsStyle;
@@ -460,6 +474,7 @@ void CSettingsManager::Init( CSetting *pSettings, TSettingsComponent component, 
 	m_pSettings=pSettings;
 	m_pCustom=pCustom;
 	m_SettingsStyle=m_SettingsMask=0;
+	BuildLookup(); // names and types never change after this point
 	InitializeSRWLock(&g_SettingsLock);
 	CSettingsLockWrite lock;
 	for (CSetting *pSetting=m_pSettings;pSetting->name;pSetting++)
@@ -507,16 +522,97 @@ CSettingsManager::~CSettingsManager( void )
 	ResetImageList();
 }
 
-bool CSettingsManager::GetSettingBool( const wchar_t *name ) const
+// Index of the getter that may return a setting of this type, or -1
+static int GetSettingLookupClass( int type )
 {
+	if (type==CSetting::TYPE_BOOL) return 0;
+	if (type==CSetting::TYPE_INT || type==CSetting::TYPE_HOTKEY || type==CSetting::TYPE_HOTKEY_ANY || type==CSetting::TYPE_COLOR) return 1;
+	if (type>=CSetting::TYPE_STRING) return 2;
+	return -1;
+}
+
+// FNV-1a with ASCII letters folded. Setting names are ASCII identifiers, and every
+// candidate is still confirmed with the same _wcsicmp the linear scan used.
+static unsigned int HashSettingName( const wchar_t *name )
+{
+	unsigned int hash=2166136261u;
+	for (;*name;name++)
+	{
+		unsigned int c=*name;
+		if (c>='A' && c<='Z') c+='a'-'A';
+		hash=(hash^c)*16777619u;
+	}
+	return hash;
+}
+
+void CSettingsManager::BuildLookup( void )
+{
+	size_t counts[LOOKUP_COUNT]={};
 	for (const CSetting *pSetting=m_pSettings;pSetting->name;pSetting++)
 	{
-		if (pSetting->type==CSetting::TYPE_BOOL && _wcsicmp(pSetting->name,name)==0)
+		int lookup=GetSettingLookupClass(pSetting->type);
+		if (lookup>=0) counts[lookup]++;
+	}
+	for (int i=0;i<LOOKUP_COUNT;i++)
+	{
+		// power of two, at most half full, so every probe sequence reaches an empty slot
+		size_t size=16;
+		while (size<counts[i]*2) size*=2;
+		m_Lookup[i].assign(size,LookupSlot());
+	}
+	for (const CSetting *pSetting=m_pSettings;pSetting->name;pSetting++)
+	{
+		int lookup=GetSettingLookupClass(pSetting->type);
+		if (lookup<0) continue;
+		std::vector<LookupSlot> &table=m_Lookup[lookup];
+		size_t mask=table.size()-1;
+		unsigned int hash=HashSettingName(pSetting->name);
+		for (size_t i=hash&mask;;i=(i+1)&mask)
 		{
-			Assert(!pSetting->pLinkTo);
-			CSettingsLockRead lock;
-			return IsVariantTrue(pSetting->value);
+			LookupSlot &slot=table[i];
+			if (!slot.pSetting)
+			{
+				slot.hash=hash;
+				slot.pSetting=pSetting;
+				break;
+			}
+			if (slot.hash==hash && _wcsicmp(slot.pSetting->name,pSetting->name)==0)
+				break; // keep the first entry, like the linear scan
 		}
+	}
+}
+
+const CSetting *CSettingsManager::LookupSetting( TLookupClass lookup, const wchar_t *name ) const
+{
+	if (!name) return NULL;
+	const std::vector<LookupSlot> &table=m_Lookup[lookup];
+	if (!table.empty())
+	{
+		size_t mask=table.size()-1;
+		unsigned int hash=HashSettingName(name);
+		for (size_t i=hash&mask;table[i].pSetting;i=(i+1)&mask)
+		{
+			if (table[i].hash==hash && _wcsicmp(table[i].pSetting->name,name)==0)
+				return table[i].pSetting;
+		}
+	}
+	// not in the index: fall back to the original linear scan
+	for (const CSetting *pSetting=m_pSettings;pSetting && pSetting->name;pSetting++)
+	{
+		if (GetSettingLookupClass(pSetting->type)==lookup && _wcsicmp(pSetting->name,name)==0)
+			return pSetting;
+	}
+	return NULL;
+}
+
+bool CSettingsManager::GetSettingBool( const wchar_t *name ) const
+{
+	const CSetting *pSetting=LookupSetting(LOOKUP_BOOL,name);
+	if (pSetting)
+	{
+		Assert(!pSetting->pLinkTo);
+		CSettingsLockRead lock;
+		return IsVariantTrue(pSetting->value);
 	}
 	Assert(0);
 	return false;
@@ -524,15 +620,13 @@ bool CSettingsManager::GetSettingBool( const wchar_t *name ) const
 
 bool CSettingsManager::GetSettingBool( const wchar_t *name, bool &bDef ) const
 {
-	for (const CSetting *pSetting=m_pSettings;pSetting->name;pSetting++)
+	const CSetting *pSetting=LookupSetting(LOOKUP_BOOL,name);
+	if (pSetting)
 	{
-		if (pSetting->type==CSetting::TYPE_BOOL && _wcsicmp(pSetting->name,name)==0)
-		{
-			Assert(!pSetting->pLinkTo);
-			CSettingsLockRead lock;
-			bDef=pSetting->IsDefault() && !pSetting->IsForcedDefault();
-			return IsVariantTrue(pSetting->value);
-		}
+		Assert(!pSetting->pLinkTo);
+		CSettingsLockRead lock;
+		bDef=pSetting->IsDefault() && !pSetting->IsForcedDefault();
+		return IsVariantTrue(pSetting->value);
 	}
 	Assert(0);
 	bDef=false;
@@ -541,15 +635,13 @@ bool CSettingsManager::GetSettingBool( const wchar_t *name, bool &bDef ) const
 
 int CSettingsManager::GetSettingInt( const wchar_t *name ) const
 {
-	for (const CSetting *pSetting=m_pSettings;pSetting->name;pSetting++)
+	const CSetting *pSetting=LookupSetting(LOOKUP_INT,name);
+	if (pSetting)
 	{
-		if ((pSetting->type==CSetting::TYPE_INT || pSetting->type==CSetting::TYPE_HOTKEY || pSetting->type==CSetting::TYPE_HOTKEY_ANY || pSetting->type==CSetting::TYPE_COLOR) && _wcsicmp(pSetting->name,name)==0)
-		{
-			Assert(!pSetting->pLinkTo);
-			CSettingsLockRead lock;
-			Assert(pSetting->value.vt==VT_I4);
-			return pSetting->value.intVal;
-		}
+		Assert(!pSetting->pLinkTo);
+		CSettingsLockRead lock;
+		Assert(pSetting->value.vt==VT_I4);
+		return pSetting->value.intVal;
 	}
 	Assert(0);
 	return 0;
@@ -557,16 +649,14 @@ int CSettingsManager::GetSettingInt( const wchar_t *name ) const
 
 int CSettingsManager::GetSettingInt( const wchar_t *name, bool &bDef ) const
 {
-	for (const CSetting *pSetting=m_pSettings;pSetting->name;pSetting++)
+	const CSetting *pSetting=LookupSetting(LOOKUP_INT,name);
+	if (pSetting)
 	{
-		if ((pSetting->type==CSetting::TYPE_INT || pSetting->type==CSetting::TYPE_HOTKEY || pSetting->type==CSetting::TYPE_HOTKEY_ANY || pSetting->type==CSetting::TYPE_COLOR) && _wcsicmp(pSetting->name,name)==0)
-		{
-			Assert(!pSetting->pLinkTo);
-			CSettingsLockRead lock;
-			Assert(pSetting->value.vt==VT_I4);
-			bDef=pSetting->IsDefault() && !pSetting->IsForcedDefault();
-			return pSetting->value.intVal;
-		}
+		Assert(!pSetting->pLinkTo);
+		CSettingsLockRead lock;
+		Assert(pSetting->value.vt==VT_I4);
+		bDef=pSetting->IsDefault() && !pSetting->IsForcedDefault();
+		return pSetting->value.intVal;
 	}
 	Assert(0);
 	bDef=false;
@@ -575,15 +665,13 @@ int CSettingsManager::GetSettingInt( const wchar_t *name, bool &bDef ) const
 
 CString CSettingsManager::GetSettingString( const wchar_t *name ) const
 {
-	for (const CSetting *pSetting=m_pSettings;pSetting->name;pSetting++)
+	const CSetting *pSetting=LookupSetting(LOOKUP_STRING,name);
+	if (pSetting)
 	{
-		if (pSetting->type>=CSetting::TYPE_STRING && _wcsicmp(pSetting->name,name)==0)
-		{
-			Assert(!pSetting->pLinkTo);
-			CSettingsLockRead lock;
-			Assert(pSetting->value.vt==VT_BSTR);
-			return pSetting->value.bstrVal;
-		}
+		Assert(!pSetting->pLinkTo);
+		CSettingsLockRead lock;
+		Assert(pSetting->value.vt==VT_BSTR);
+		return pSetting->value.bstrVal;
 	}
 	Assert(0);
 	return CString();
