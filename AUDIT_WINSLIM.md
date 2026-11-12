@@ -16,8 +16,8 @@ estaban bien; los fallos corregidos vienen del código heredado:
 | `CMenuFader::s_Faders` se modificaba desde varios hilos sin bloqueo, un fundido sin ventana dejaba su hilo esperando para siempre y `ClearAll` podía repetir sin fin `SendMessage` a un `HWND` nulo | `SRWLOCK` para la lista, limpieza si no se crea la ventana y la región se libera si `SetWindowRgn` falla. |
 
 `tools/verify.py` añade una regresión por cada punto. No se ha compilado ni
-ejecutado el binario nuevo. Para instalar encima de 4.4.1004 hay que compilar con
-otra versión (`-Version 4.4.1005`).
+ejecutado el binario nuevo. La versión por defecto pasa a **4.4.1005**: el MSI
+rechaza instalar la misma versión que ya está instalada.
 
 ## Primera revisión
 

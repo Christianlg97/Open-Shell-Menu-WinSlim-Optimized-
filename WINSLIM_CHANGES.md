@@ -1,6 +1,6 @@
 # Open-Shell para WinSlim: cambios y compilación
 
-La versión actual por defecto es **4.4.1004**. Classic Explorer, Classic IE y
+La versión actual por defecto es **4.4.1005**. Classic Explorer, Classic IE y
 Open-Shell Update se han retirado de los proyectos y del instalador. Se conserva
 el menú, sus skins, idiomas y extensiones necesarias. El módulo Dark Mode se ha
 retirado completamente. El [perfil de WinSlim](Src/Setup/WinSlim/README.md) se
@@ -21,7 +21,7 @@ Desde CMD en la carpeta del proyecto:
 
 ```bat
 .\build.cmd
-.\build.cmd -Version 4.4.1004 -Language Spanish
+.\build.cmd -Version 4.4.1005 -Language Spanish
 ```
 
 Al abrir `build.cmd` con doble clic, la ventana espera una tecla al terminar,
