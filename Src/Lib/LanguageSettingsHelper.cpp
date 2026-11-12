@@ -11,7 +11,6 @@
 #include "FNVHash.h"
 #include "StringUtils.h"
 #include "Translations.h"
-#include "DownloadHelper.h"
 #include <uxtheme.h>
 #include <map>
 #include <algorithm>

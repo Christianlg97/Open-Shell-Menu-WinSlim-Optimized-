@@ -61,6 +61,7 @@ struct CSetting
 		FLAG_LOCKED_GP=      0x08000, // locked by a group policy
 		FLAG_LOCKED_MASK=FLAG_LOCKED_REG|FLAG_LOCKED_GP,
 		FLAG_WARNING=        0x10000, // show a warning icon
+		FLAG_PROFILE_DEFAULT=0x20000, // editable defaults supplied by the installed profile
 		// top 8 bits need to stay unused. that's where we store the color index
 	};
 

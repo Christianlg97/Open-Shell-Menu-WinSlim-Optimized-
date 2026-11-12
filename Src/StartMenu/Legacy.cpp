@@ -30,8 +30,6 @@ void ImportLegacyData()
 	CRegKey reg;
 	if (reg.Open(HKEY_CURRENT_USER, L"Software\\OpenShell", KEY_READ | KEY_WOW64_64KEY) == ERROR_FILE_NOT_FOUND)
 	{
-		CopyRegKey(HKEY_CURRENT_USER, L"Software\\IvoSoft\\ClassicExplorer", L"Software\\OpenShell\\ClassicExplorer");
-		CopyRegKey(HKEY_CURRENT_USER, L"Software\\IvoSoft\\ClassicIE", L"Software\\OpenShell\\ClassicIE");
 		CopyRegKey(HKEY_CURRENT_USER, L"Software\\IvoSoft\\ClassicShell", L"Software\\OpenShell\\OpenShell");
 		CopyRegKey(HKEY_CURRENT_USER, L"Software\\IvoSoft\\ClassicStartMenu", L"Software\\OpenShell\\StartMenu");
 

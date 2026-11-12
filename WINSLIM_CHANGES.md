@@ -1,12 +1,27 @@
 # Open-Shell para WinSlim: cambios y compilación
 
+La versión actual por defecto es **4.4.1004**. Classic Explorer, Classic IE y
+Open-Shell Update se han retirado de los proyectos y del instalador. Se conserva
+el menú, sus skins, idiomas y extensiones necesarias. El módulo Dark Mode se ha
+retirado completamente. El [perfil de WinSlim](Src/Setup/WinSlim/README.md) se
+instala como configuración base editable, con su skin y botón incluidos.
+Conserva las animaciones, el diseño, las funciones y los ajustes de rendimiento
+del perfil original. Consultar [la revisión actual](AUDIT_WINSLIM.md) para
+los fallos corregidos y las validaciones pendientes. Las secciones históricas
+de este documento sobre el actualizador describen código ya retirado.
+
+Las instalaciones y reparaciones regeneran las cachés del menú sin restablecer
+preferencias ni accesos anclados. El VBS de WinSlim puede programar también esa
+limpieza, como máximo cada 30 días y sin cerrar el menú durante el mantenimiento.
+Consultar [los archivos afectados y la validación](tools/maintenance/README.md).
+
 ## Compilar los MSI separados
 
 Desde CMD en la carpeta del proyecto:
 
 ```bat
 .\build.cmd
-.\build.cmd -Version 4.4.1001 -Language Spanish
+.\build.cmd -Version 4.4.1004 -Language Spanish
 ```
 
 Al abrir `build.cmd` con doble clic, la ventana espera una tecla al terminar,

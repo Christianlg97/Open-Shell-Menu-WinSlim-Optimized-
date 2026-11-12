@@ -363,3 +363,4 @@ Src/Setup/Temp/
 
 # Rust regression/build outputs
 Src/RustCore/target/
+build/static-checks/

@@ -266,211 +266,71 @@ int CalcMsiChecksum( wchar_t *const *params, int count )
 
 int MakeEnglishDll( wchar_t *const *params, int count )
 {
-	if (count<5) return 2;
-
+	if (count!=2) return 2;
 	AttachConsole(ATTACH_PARENT_PROCESS);
-
-	HMODULE hEn0=LoadLibraryEx(L"en-US.dll",NULL,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
-	if (!hEn0)
-	{
-		Printf("Failed to open en-US.dll (err: %d)\n",GetLastError());
-		return 1;
-	}
-
-	std::vector<char> version;
-	{
-		HRSRC hResInfo=FindResource(hEn0,MAKEINTRESOURCE(VS_VERSION_INFO),RT_VERSION);
-		if (hResInfo)
-		{
-			HGLOBAL hRes=LoadResource(hEn0,hResInfo);
-			void *pRes=LockResource(hRes);
-			if (pRes)
-			{
-				DWORD len=SizeofResource(hEn0,hResInfo);
-				if (len>=40+sizeof(VS_FIXEDFILEINFO))
-				{
-					version.resize(len);
-					memcpy(&version[0],pRes,len);
-				}
-			}
-		}
-	}
-	FreeLibrary(hEn0);
-	if (version.empty())
-	{
-		Printf("Can't find version resource in en-US.dll\n");
-		return 1;
-	}
-
-	HANDLE hEn=BeginUpdateResource(L"en-US.dll",FALSE);
-	if (!hEn)
-	{
-		Printf("Failed to open en-US.dll (err: %d)\n",GetLastError());
-		return 1;
-	}
-
-	int res=1;
-	HMODULE hExplorer=NULL, hMenu=NULL, hIE=NULL;
-	WORD language=MAKELANGID(LANG_ENGLISH,SUBLANG_ENGLISH_US);
-
-	// get version, strings and dialog from ClassicExplorer32.dll
-	hExplorer=LoadLibraryEx(params[1],NULL,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
-	if (!hExplorer)
+	HMODULE menu=LoadLibraryEx(params[1],NULL,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+	if (!menu)
 	{
 		Printf("Failed to open %S (err: %d)\n",params[1],GetLastError());
-		goto qqq;
+		return 1;
 	}
-
-	// copy version
+	HMODULE sample=LoadLibraryEx(L"en-US.dll",NULL,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+	std::vector<char> version;
+	if (sample)
 	{
-		HRSRC hResInfo=FindResource(hExplorer,MAKEINTRESOURCE(VS_VERSION_INFO),RT_VERSION);
-		void *pRes=NULL;
-		if (hResInfo)
+		HRSRC resource=FindResource(sample,MAKEINTRESOURCE(VS_VERSION_INFO),RT_VERSION);
+		const void *data=resource?LockResource(LoadResource(sample,resource)):NULL;
+		if (data)
 		{
-			HGLOBAL hRes=LoadResource(hExplorer,hResInfo);
-			pRes=LockResource(hRes);
+			DWORD size=SizeofResource(sample,resource);
+			version.assign((const char*)data,(const char*)data+size);
 		}
-		if (!pRes)
-		{
-			Printf("Can't find version resource in %S\n",params[1]);
-			goto qqq;
-		}
-		VS_FIXEDFILEINFO *pVer=(VS_FIXEDFILEINFO*)((char*)pRes+40);
-		VS_FIXEDFILEINFO *pVer0=(VS_FIXEDFILEINFO*)(&version[40]);
-		pVer0->dwProductVersionMS=pVer->dwProductVersionMS;
-		pVer0->dwProductVersionLS=pVer->dwProductVersionLS;
-		pVer0->dwFileVersionMS=pVer->dwFileVersionMS;
-		pVer0->dwFileVersionLS=pVer->dwFileVersionLS;
-		UpdateResource(hEn,RT_VERSION,MAKEINTRESOURCE(VS_VERSION_INFO),language,&version[0],version.size());
+		FreeLibrary(sample);
 	}
-
-	// copy strings
-	for (int i=2000;i<3000;i+=16)
+	VS_FIXEDFILEINFO *source=NULL, *destination=NULL;
+	UINT sourceSize=0, destinationSize=0;
+	HRSRC resource=FindResource(menu,MAKEINTRESOURCE(VS_VERSION_INFO),RT_VERSION);
+	const void *data=resource?LockResource(LoadResource(menu,resource)):NULL;
+	if (!data || version.empty() ||
+		!VerQueryValue(data,L"\\",(void**)&source,&sourceSize) || sourceSize<sizeof(*source) ||
+		!VerQueryValue(version.data(),L"\\",(void**)&destination,&destinationSize) || destinationSize<sizeof(*destination))
 	{
-		int id=i/16;
-		HRSRC hResInfo=FindResource(hExplorer,MAKEINTRESOURCE(id),RT_STRING);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hExplorer,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_STRING,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hExplorer,hResInfo));
+		Printf("Missing or invalid version resource in the menu or en-US.dll\n");
+		FreeLibrary(menu);
+		return 1;
 	}
-
-	// copy dialogs
-	for (int id=2000;id<2010;id++)
-	{
-		HRSRC hResInfo=FindResource(hExplorer,MAKEINTRESOURCE(id),RT_DIALOG);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hExplorer,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_DIALOG,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hExplorer,hResInfo));
-	}
-
-	// get strings and dialog from StartMenuDLL.dll
-	hMenu=LoadLibraryEx(params[2],NULL,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
-	if (!hMenu)
-	{
-		Printf("Failed to open %S (err: %d)\n",params[2],GetLastError());
-		goto qqq;
-	}
-
-	// copy strings
-	for (int i=3000;i<5000;i+=16)
-	{
-		int id=i/16;
-		HRSRC hResInfo=FindResource(hMenu,MAKEINTRESOURCE(id),RT_STRING);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hMenu,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_STRING,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hMenu,hResInfo));
-	}
-	for (int i=7000;i<8000;i+=16)
-	{
-		int id=i/16;
-		HRSRC hResInfo=FindResource(hMenu,MAKEINTRESOURCE(id),RT_STRING);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hMenu,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_STRING,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hMenu,hResInfo));
-	}
-
-	// copy dialogs
-	for (int id=3000;id<4010;id++)
-	{
-		HRSRC hResInfo=FindResource(hMenu,MAKEINTRESOURCE(id),RT_DIALOG);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hMenu,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_DIALOG,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hMenu,hResInfo));
-	}
-
-	// get strings from ClassicIEDLL.dll
-	hIE=LoadLibraryEx(params[3],NULL,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
-	if (!hIE)
-	{
-		Printf("Failed to open %S (err: %d)\n",params[3],GetLastError());
-		goto qqq;
-	}
-
-	// copy strings
-	for (int i=5000;i<6000;i+=16)
-	{
-		int id=i/16;
-		HRSRC hResInfo=FindResource(hIE,MAKEINTRESOURCE(id),RT_STRING);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hIE,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_STRING,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hIE,hResInfo));
-	}
-
-	// get strings and dialog from Update.exe
-	hMenu=LoadLibraryEx(params[4],NULL,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
-	if (!hMenu)
-	{
-		Printf("Failed to open %S (err: %d)\n",params[4],GetLastError());
-		goto qqq;
-	}
-
-	// copy strings
-	for (int i=6000;i<7000;i+=16)
-	{
-		int id=i/16;
-		HRSRC hResInfo=FindResource(hMenu,MAKEINTRESOURCE(id),RT_STRING);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hMenu,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_STRING,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hMenu,hResInfo));
-	}
-
-	// copy dialogs
-	for (int id=6000;id<6010;id++)
-	{
-		HRSRC hResInfo=FindResource(hMenu,MAKEINTRESOURCE(id),RT_DIALOG);
-		if (!hResInfo) continue;
-		HGLOBAL hRes=LoadResource(hMenu,hResInfo);
-		void *pRes=LockResource(hRes);
-		if (!pRes) continue;
-		UpdateResource(hEn,RT_DIALOG,MAKEINTRESOURCE(id),language,pRes,SizeofResource(hMenu,hResInfo));
-	}
-
-	res=0;
-qqq:
-	if (!EndUpdateResource(hEn,res!=0) && res==0)
+	destination->dwProductVersionMS=source->dwProductVersionMS;
+	destination->dwProductVersionLS=source->dwProductVersionLS;
+	destination->dwFileVersionMS=source->dwFileVersionMS;
+	destination->dwFileVersionLS=source->dwFileVersionLS;
+	HANDLE output=BeginUpdateResource(L"en-US.dll",FALSE);
+	if (!output)
 	{
 		Printf("Failed to update en-US.dll (err: %d)\n",GetLastError());
-		res=1;
+		FreeLibrary(menu);
+		return 1;
 	}
-	if (hExplorer) FreeLibrary(hExplorer);
-	if (hMenu) FreeLibrary(hMenu);
-	if (hIE) FreeLibrary(hIE);
-
-	return res;
+	WORD language=MAKELANGID(LANG_ENGLISH,SUBLANG_ENGLISH_US);
+	bool ok=UpdateResource(output,RT_VERSION,MAKEINTRESOURCE(VS_VERSION_INFO),language,version.data(),(DWORD)version.size())!=FALSE;
+	auto copyResource=[&](LPCWSTR type, int id)
+	{
+		HRSRC res=FindResource(menu,MAKEINTRESOURCE(id),type);
+		if (!res) return true; // Sparse resource ID ranges are intentional.
+		void *bytes=LockResource(LoadResource(menu,res));
+		return bytes && UpdateResource(output,type,MAKEINTRESOURCE(id),language,bytes,SizeofResource(menu,res));
+	};
+	for (int id=3000/16+1;ok && id<=4999/16+1;id++) ok=copyResource(RT_STRING,id);
+	for (int id=7000/16+1;ok && id<=7999/16+1;id++) ok=copyResource(RT_STRING,id);
+	for (int id=3000;ok && id<4010;id++) ok=copyResource(RT_DIALOG,id);
+	DWORD error=ok?ERROR_SUCCESS:GetLastError();
+	if (!EndUpdateResource(output,!ok))
+	{
+		ok=false;
+		error=GetLastError();
+	}
+	FreeLibrary(menu);
+	if (!ok) Printf("Failed to write menu localization resources (err: %d)\n",error);
+	return ok?0:1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -907,7 +767,7 @@ static HRESULT CALLBACK TaskDialogCallback( HWND hwnd, UINT uNotification, WPARA
 // Usage:
 //   no parameters - saves a troubleshooting log
 //   crcmsi <msi path> // creates a file with checksum of all msi files
-//   makeEN <explorer dll> <start menu dll> <ie dll> <update exe> // extracts the localization resources and creates a sample en-US.DLL
+//   makeEN <start menu dll> // extracts the localization resources and creates a sample en-US.DLL
 //   extract <dll> <csv> // extracts the string table, the dialog text, and the L10N text from a DLL and stores it in a CSV
 //   extract en-us.dll <dll> <csv> // extracts the string table, the dialog text, and the L10N text from two DLL and stores it in a CSV
 //   import <dll> <csv> // replaces the string table in the DLL with the text from the CSV

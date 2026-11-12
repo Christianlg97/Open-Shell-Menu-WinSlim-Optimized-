@@ -5,6 +5,24 @@ param(
 )
 $ErrorActionPreference='Stop'
 $installer=$null; $database=$null; $summary=$null; $view=$null
+function Read-MsiStrings([object]$Database,[string]$Query) {
+    $queryView=$null; $queryRecord=$null
+    try {
+        $queryView=$Database.OpenView($Query)
+        $queryView.Execute()
+        while ($queryRecord=$queryView.Fetch()) {
+            [string]$queryRecord.StringData(1)
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($queryRecord)
+            $queryRecord=$null
+        }
+    } finally {
+        if ($null -ne $queryRecord) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($queryRecord) }
+        if ($null -ne $queryView) {
+            $queryView.Close()
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($queryView)
+        }
+    }
+}
 try {
     $installer=New-Object -ComObject WindowsInstaller.Installer
     $database=$installer.OpenDatabase([IO.Path]::GetFullPath($MsiPath),0)
@@ -25,6 +43,14 @@ try {
         if ($cabinet -and -not $cabinet.StartsWith('#')) { throw "MSI requires an external cabinet: $cabinet" }
     }
     $view.Close()
+    $features=@(Read-MsiStrings $database 'SELECT `Feature` FROM `Feature`')
+    $expectedFeatures=@('OpenShell','StartMenu')
+    if (@(Compare-Object ($features | Sort-Object) ($expectedFeatures | Sort-Object)).Count) { throw "Unexpected MSI features: $($features -join ', ')" }
+    $files=@(Read-MsiStrings $database 'SELECT `FileName` FROM `File`') | ForEach-Object { ($_ -split '\|')[-1] }
+    if (@($files | Where-Object { $_ -match '^(ClassicExplorer|ClassicIE|DesktopToasts|Update\.exe|WinSlimDarkMode)' }).Count) { throw 'Removed module found in MSI payload' }
+    foreach ($file in @('MenuSettings.xml','StartButton.bmp','Fluent-Metro.skin','Fluent-Metro.skin7')) {
+        if ($file -notin $files) { throw "Missing WinSlim profile asset: $file" }
+    }
     Write-Host "Verified standalone $Architecture MSI: $MsiPath"
 } finally {
     foreach ($item in @($view,$summary,$database,$installer)) {

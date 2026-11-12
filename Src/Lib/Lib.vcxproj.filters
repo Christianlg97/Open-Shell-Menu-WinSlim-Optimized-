@@ -50,6 +50,9 @@
     <ClInclude Include="Assert.h">
       <Filter>Strings</Filter>
     </ClInclude>
+    <ClInclude Include="CacheMaintenance.h">
+      <Filter>Lib</Filter>
+    </ClInclude>
     <ClInclude Include="FNVHash.h">
       <Filter>Strings</Filter>
     </ClInclude>
@@ -76,9 +79,6 @@
     </ClInclude>
     <ClInclude Include="TrackResources.h">
       <Filter>Resources</Filter>
-    </ClInclude>
-    <ClInclude Include="DownloadHelper.h">
-      <Filter>Settings</Filter>
     </ClInclude>
     <ClInclude Include="LanguageSettingsHelper.h">
       <Filter>Settings</Filter>
@@ -129,9 +129,6 @@
     </ClCompile>
     <ClCompile Include="TrackResources.cpp">
       <Filter>Resources</Filter>
-    </ClCompile>
-    <ClCompile Include="DownloadHelper.cpp">
-      <Filter>Settings</Filter>
     </ClCompile>
     <ClCompile Include="LanguageSettingsHelper.cpp">
       <Filter>Settings</Filter>

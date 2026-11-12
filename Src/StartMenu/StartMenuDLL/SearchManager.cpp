@@ -57,21 +57,25 @@ CSearchManager::~CSearchManager( void )
 
 void CSearchManager::Init( void )
 {
+	if (m_bInitialized) return;
 	m_bInitialized=true;
 	for (int i=0;i<LOCK_COUNT;i++)
 		InitializeCriticalSection(&m_CriticalSections[i]);
 	m_SearchEvent=CreateEvent(NULL,FALSE,FALSE,NULL);
 	m_ExitEvent=CreateEvent(NULL,TRUE,FALSE,NULL);
-	for (int i=0;i<_countof(m_SearchThreads);i++)
-		m_SearchThreads[i]=CreateThread(NULL,0,StaticSearchThread,this,0,NULL);
 	m_MainThreadId=GetCurrentThreadId();
 	LoadItemRanks();
+	// WAIT_FAILED otherwise becomes a tight loop in the worker when handle
+	// creation fails. Keep the locks usable so callers and Close remain safe.
+	if (!m_SearchEvent || !m_ExitEvent) return;
+	for (int i=0;i<_countof(m_SearchThreads);i++)
+		m_SearchThreads[i]=CreateThread(NULL,0,StaticSearchThread,this,0,NULL);
 }
 
 void CSearchManager::Close( void )
 {
 	if (!m_bInitialized) return;
-	SetEvent(m_ExitEvent);
+	if (m_ExitEvent) SetEvent(m_ExitEvent);
 	for (int i=0;i<_countof(m_SearchThreads);i++)
 	{
 		if (!m_SearchThreads[i]) continue;
@@ -800,7 +804,14 @@ void CSearchManager::SearchThread( void )
 			continue;
 		}
 
-		if (searchRequest.requestId!=m_LastRequestId || (!searchRequest.bSearchFiles && !searchRequest.bSearchMetroSettings))
+		bool searchMetroIndex=false;
+		{
+			Lock lock(this,LOCK_DATA);
+			searchMetroIndex=searchRequest.bSearchMetroSettings && !m_bMetroSettingsFound;
+		}
+		// The Shell already supplies modern settings on supported systems. With
+		// file search disabled, an empty index scope needs no OLE DB connection.
+		if (searchRequest.requestId!=m_LastRequestId || (!searchRequest.bSearchFiles && !searchMetroIndex))
 			continue;
 		CMenuContainer::RefreshSearch();
 		searchRequest.searchTime=GetTickCount();
@@ -811,7 +822,7 @@ void CSearchManager::SearchThread( void )
 		{
 			std::vector<SearchScope> scopeList;
 
-			if (searchRequest.bSearchMetroSettings && !m_bMetroSettingsFound)
+			if (searchMetroIndex)
 			{
 				scopeList.push_back(SearchScope());
 				SearchScope &scope=*scopeList.rbegin();

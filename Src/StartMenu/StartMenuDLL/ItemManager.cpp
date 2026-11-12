@@ -2501,7 +2501,7 @@ void CItemManager::LoadMetroIcon( IShellItem *pItem, int &refreshFlags, const Ic
 	unsigned int hash;
 	{
 		CComString pName;
-		pItem->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING,&pName);
+		if (FAILED(pItem->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING,&pName)) || !pName) return;
 		hash=CalcFNVHash(pName);
 	}
 
@@ -2540,8 +2540,11 @@ void CItemManager::LoadMetroIcon( IShellItem *pItem, int &refreshFlags, const Ic
 		if (SUCCEEDED(pResMap->GetFilePath(iconName,&pLocation)))
 		{
 			hSmallBitmap=LoadMetroBitmap0(pLocation,SMALL_ICON_SIZE,*pMetroColor);
-			refreshFlags&=~INFO_SMALL_ICON;
-			StoreInCache(hash,L"",hSmallBitmap,NULL,NULL,INFO_SMALL_ICON,smallIcon,largeIcon,extraLargeIcon,false,true);
+			if (hSmallBitmap)
+			{
+				refreshFlags&=~INFO_SMALL_ICON;
+				StoreInCache(hash,L"",hSmallBitmap,NULL,NULL,INFO_SMALL_ICON,smallIcon,largeIcon,extraLargeIcon,false,true);
+			}
 		}
 	}
 	if ((refreshFlags&INFO_LARGE_ICON) && SetResContextTargetSize(pResContext,LARGE_ICON_SIZE))
@@ -2550,8 +2553,11 @@ void CItemManager::LoadMetroIcon( IShellItem *pItem, int &refreshFlags, const Ic
 		if (SUCCEEDED(pResMap->GetFilePath(iconName,&pLocation)))
 		{
 			hLargeBitmap=LoadMetroBitmap0(pLocation,LARGE_ICON_SIZE,*pMetroColor);
-			refreshFlags&=~INFO_LARGE_ICON;
-			StoreInCache(hash,L"",NULL,hLargeBitmap,NULL,INFO_LARGE_ICON,smallIcon,largeIcon,extraLargeIcon,false,true);
+			if (hLargeBitmap)
+			{
+				refreshFlags&=~INFO_LARGE_ICON;
+				StoreInCache(hash,L"",NULL,hLargeBitmap,NULL,INFO_LARGE_ICON,smallIcon,largeIcon,extraLargeIcon,false,true);
+			}
 		}
 	}
 	if ((refreshFlags&INFO_EXTRA_LARGE_ICON) && SetResContextTargetSize(pResContext,EXTRA_LARGE_ICON_SIZE))
@@ -2560,8 +2566,11 @@ void CItemManager::LoadMetroIcon( IShellItem *pItem, int &refreshFlags, const Ic
 		if (SUCCEEDED(pResMap->GetFilePath(iconName,&pLocation)))
 		{
 			hExtraLargeBitmap=LoadMetroBitmap0(pLocation,EXTRA_LARGE_ICON_SIZE,*pMetroColor);
-			refreshFlags&=~INFO_EXTRA_LARGE_ICON;
-			StoreInCache(hash,L"",NULL,NULL,hExtraLargeBitmap,INFO_EXTRA_LARGE_ICON,smallIcon,largeIcon,extraLargeIcon,false,true);
+			if (hExtraLargeBitmap)
+			{
+				refreshFlags&=~INFO_EXTRA_LARGE_ICON;
+				StoreInCache(hash,L"",NULL,NULL,hExtraLargeBitmap,INFO_EXTRA_LARGE_ICON,smallIcon,largeIcon,extraLargeIcon,false,true);
+			}
 		}
 	}
 }

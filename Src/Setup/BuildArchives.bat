@@ -47,58 +47,6 @@ md Output\PDB32
 md Output\PDB64
 md Output\PDBARM64
 
-REM Explorer 32
-copy /B ..\..\build\bin\Setup\ClassicExplorer32.pdb Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\ClassicExplorer32.dll Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B ..\..\build\bin\Setup\ClassicExplorerSettings.pdb Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\ClassicExplorerSettings.exe Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-
-REM Explorer 64
-copy /B ..\..\build\bin\Setup64\ClassicExplorer64.pdb Output\PDB64 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\x64\ClassicExplorer64.dll Output\PDB64 > nul
-if errorlevel 1 exit /b 1
-
-REM Explorer ARM64
-copy /B ..\..\build\bin\SetupARM64\ClassicExplorer64.pdb Output\PDBARM64 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\ARM64\ClassicExplorer64.dll Output\PDBARM64 > nul
-if errorlevel 1 exit /b 1
-
-REM IE 32
-copy /B ..\..\build\bin\Setup\ClassicIEDLL_32.pdb Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\ClassicIEDLL_32.dll Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B ..\..\build\bin\Setup\ClassicIE_32.pdb Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\ClassicIE_32.exe Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-
-REM IE 64
-copy /B ..\..\build\bin\Setup64\ClassicIEDLL_64.pdb Output\PDB64 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\x64\ClassicIEDLL_64.dll Output\PDB64 > nul
-if errorlevel 1 exit /b 1
-copy /B ..\..\build\bin\Setup64\ClassicIE_64.pdb Output\PDB64 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\x64\ClassicIE_64.exe Output\PDB64 > nul
-if errorlevel 1 exit /b 1
-
-REM IE ARM64
-copy /B ..\..\build\bin\SetupARM64\ClassicIEDLL_64.pdb Output\PDBARM64 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\ARM64\ClassicIEDLL_64.dll Output\PDBARM64 > nul
-if errorlevel 1 exit /b 1
-copy /B ..\..\build\bin\SetupARM64\ClassicIE_64.pdb Output\PDBARM64 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\ARM64\ClassicIE_64.exe Output\PDBARM64 > nul
-if errorlevel 1 exit /b 1
-
 REM Menu 32
 copy /B ..\..\build\bin\Setup\StartMenu.pdb Output\PDB32 > nul
 if errorlevel 1 exit /b 1
@@ -112,16 +60,9 @@ copy /B ..\..\build\bin\Setup\StartMenuHelper32.pdb Output\PDB32 > nul
 if errorlevel 1 exit /b 1
 copy /B Output\StartMenuHelper32.dll Output\PDB32 > nul
 if errorlevel 1 exit /b 1
-copy /B ..\..\build\bin\Release\Update.pdb Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\Update.exe Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B ..\..\build\bin\Release\DesktopToasts.pdb Output\PDB32 > nul
-if errorlevel 1 exit /b 1
-copy /B Output\DesktopToasts.dll Output\PDB32 > nul
-if errorlevel 1 exit /b 1
 
 REM Menu 64
+
 copy /B ..\..\build\bin\Setup64\StartMenu.pdb Output\PDB64 > nul
 if errorlevel 1 exit /b 1
 copy /B Output\x64\StartMenu.exe Output\PDB64 > nul
@@ -218,7 +159,7 @@ REM ***** Collect Localization files
 
 echo -- Creating localization package
 cd Localization
-7z a -r -x!en-US -x!*WixUI_en-us.wxl -x!*.adml -x!*.admx -x!*LocComments.txt ..\Setup\Final\OpenShellLoc.zip English ..\ClassicExplorer\ExplorerL10N.ini ..\StartMenu\StartMenuL10N.ini ..\StartMenu\StartMenuHelper\StartMenuHelperL10N.ini English\OpenShellText-en-US.wxl English\OpenShellEULA.rtf > nul
+7z a -r -x!en-US -x!*WixUI_en-us.wxl -x!*.adml -x!*.admx -x!*LocComments.txt ..\Setup\Final\OpenShellLoc.zip English ..\StartMenu\StartMenuL10N.ini ..\StartMenu\StartMenuHelper\StartMenuHelperL10N.ini English\OpenShellText-en-US.wxl English\OpenShellEULA.rtf > nul
 if errorlevel 1 exit /b 1
 cd ..
 

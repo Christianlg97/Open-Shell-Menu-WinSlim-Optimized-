@@ -16,7 +16,6 @@
 #include "FNVHash.h"
 #include "ResourceHelper.h"
 #include "SettingsUIHelper.h"
-#include "DownloadHelper.h"
 #include "SettingsUI.h"
 #include "MetroLinkManager.h"
 #include "ProgramsTree.h"
@@ -7361,25 +7360,6 @@ bool CMenuContainer::CloseProgramsMenu( void )
 	return true;
 }
 
-static void NewVersionCallback( VersionData &data )
-{
-	wchar_t path[_MAX_PATH];
-	GetModuleFileName(g_Instance,path,_countof(path));
-	PathRemoveFileSpec(path);
-	PathAppend(path,L"Update.exe");
-	wchar_t cmdLine[1024];
-	Sprintf(cmdLine,_countof(cmdLine),L"\"%s\" -popup",path);
-	STARTUPINFO startupInfo={sizeof(startupInfo)};
-	// don't display busy cursor as we are doing this on background
-	startupInfo.dwFlags=STARTF_FORCEOFFFEEDBACK;
-	PROCESS_INFORMATION processInfo{};
-	if (CreateProcess(path,cmdLine,NULL,NULL,TRUE,0,NULL,NULL,&startupInfo,&processInfo))
-	{
-		CloseHandle(processInfo.hThread);
-		CloseHandle(processInfo.hProcess);
-	}
-}
-
 static bool CheckForUpdates( void )
 {
 	bool bHasUpdates=false;
@@ -8657,7 +8637,6 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 		s_TooltipBalloon.SendMessage(TTM_TRACKACTIVATE,TRUE,(LPARAM)&tool);
 		pStartMenu->SetTimer(TIMER_BALLOON_HIDE,10000);
 	}
-	CheckForNewVersion(NULL,COMPONENT_MENU,CHECK_AUTO,NewVersionCallback);
 
 	TraceInteraction(TRACE_MENU_OPENED,pStartMenu->m_hWnd,0,bKeyboard,0);
 	QueueInteractionTraceFlush();

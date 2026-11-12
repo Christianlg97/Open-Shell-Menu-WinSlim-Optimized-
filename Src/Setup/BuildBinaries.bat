@@ -58,7 +58,7 @@ REM ********* Make en-US.dll
 set "CS_BUILD_STEP=Generar en-US.dll"
 echo --- %CS_BUILD_STEP%
 cd ..
-..\build\bin\Release\Utility.exe makeEN ..\build\bin\Setup\ClassicExplorer32.dll ..\build\bin\Setup\StartMenuDLL.dll ..\build\bin\Setup\ClassicIEDLL_32.dll ..\build\bin\Release\Update.exe
+..\build\bin\Release\Utility.exe makeEN ..\build\bin\Setup\StartMenuDLL.dll
 @if ERRORLEVEL 1 goto build_failed
 
 set "CS_BUILD_STEP=Exportar en-US.csv con Utility.exe"
@@ -79,23 +79,11 @@ REM ********* Copy binaries
 set "CS_BUILD_STEP=Copiar los binarios del instalador"
 echo --- %CS_BUILD_STEP%
 
-copy /B ..\..\build\bin\Setup\ClassicExplorer32.dll Output > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\Setup\ClassicExplorerSettings.exe Output > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\Setup\ClassicIEDLL_32.dll Output > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\Setup\ClassicIE_32.exe Output > nul
-if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\Setup\StartMenu.exe Output > nul
 if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\Setup\StartMenuDLL.dll Output > nul
 if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\Setup\StartMenuHelper32.dll Output > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\Release\Update.exe Output > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\Release\DesktopToasts.dll Output > nul
 if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\Release\SetupHelper.exe Output > nul
 if errorlevel 1 goto build_failed
@@ -103,12 +91,6 @@ copy /B ..\..\build\bin\Release\Utility.exe Output > nul
 if errorlevel 1 goto build_failed
 
 if "%CS_BUILD_ARM64%"=="0" goto skip_arm64_copy
-copy /B ..\..\build\bin\SetupARM64\ClassicExplorer64.dll Output\ARM64 > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\SetupARM64\ClassicIEDLL_64.dll Output\ARM64 > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\SetupARM64\ClassicIE_64.exe Output\ARM64 > nul
-if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\SetupARM64\StartMenu.exe Output\ARM64 > nul
 if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\SetupARM64\StartMenuDLL.dll Output\ARM64 > nul
@@ -117,18 +99,13 @@ copy /B ..\..\build\bin\SetupARM64\StartMenuHelper64.dll Output\ARM64 > nul
 if errorlevel 1 goto build_failed
 
 :skip_arm64_copy
-copy /B ..\..\build\bin\Setup64\ClassicExplorer64.dll Output\x64 > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\Setup64\ClassicIEDLL_64.dll Output\x64 > nul
-if errorlevel 1 goto build_failed
-copy /B ..\..\build\bin\Setup64\ClassicIE_64.exe Output\x64 > nul
-if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\Setup64\StartMenu.exe Output\x64 > nul
 if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\Setup64\StartMenuDLL.dll Output\x64 > nul
 if errorlevel 1 goto build_failed
 copy /B ..\..\build\bin\Setup64\StartMenuHelper64.dll Output\x64 > nul
 if errorlevel 1 goto build_failed
+
 
 set "CS_BUILD_STEP=Copiar las skins del instalador"
 echo --- %CS_BUILD_STEP%
@@ -174,20 +151,18 @@ if exist Output\PolicyDefinitions.zip (
 cd ..\Localization\English
 ..\..\..\build\bin\Setup\StartMenu.exe -saveadmx en-US
 @if ERRORLEVEL 1 goto build_failed
-..\..\..\build\bin\Setup\ClassicExplorerSettings.exe -saveadmx en-US
-@if ERRORLEVEL 1 goto build_failed
-..\..\..\build\bin\Setup\ClassicIE_32.exe -saveadmx en-US
-@if ERRORLEVEL 1 goto build_failed
 md en-US
-copy /B *.adml en-US > nul
+copy /B OpenShell.adml en-US > nul
+if errorlevel 1 goto build_failed
+copy /B OpenShellStartMenu.adml en-US > nul
 if errorlevel 1 goto build_failed
 set "CS_BUILD_STEP=Empaquetar PolicyDefinitions.zip"
 echo --- %CS_BUILD_STEP%
 where tar.exe >nul 2>&1
 if errorlevel 1 (
-	7z a -tzip ..\..\Setup\Output\PolicyDefinitions.zip *.admx en-US\*.adml PolicyDefinitions.rtf >nul
+	7z a -tzip ..\..\Setup\Output\PolicyDefinitions.zip OpenShell.admx OpenShellStartMenu.admx en-US\OpenShell.adml en-US\OpenShellStartMenu.adml PolicyDefinitions.rtf >nul
 ) else (
-	tar -a -c -f ..\..\Setup\Output\PolicyDefinitions.zip *.admx en-US\*.adml PolicyDefinitions.rtf
+	tar -a -c -f ..\..\Setup\Output\PolicyDefinitions.zip OpenShell.admx OpenShellStartMenu.admx en-US\OpenShell.adml en-US\OpenShellStartMenu.adml PolicyDefinitions.rtf
 )
 if errorlevel 1 goto build_failed
 rd /Q /S en-US

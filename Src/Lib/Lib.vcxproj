@@ -82,8 +82,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Assert.h" />
+    <ClInclude Include="CacheMaintenance.h" />
     <ClInclude Include="ComHelper.h" />
-    <ClInclude Include="DownloadHelper.h" />
     <ClInclude Include="FileHelper.h" />
     <ClInclude Include="FNVHash.h" />
     <ClInclude Include="IatHookHelper.h" />
@@ -103,7 +103,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Assert.cpp" />
-    <ClCompile Include="DownloadHelper.cpp" />
     <ClCompile Include="FileHelper.cpp" />
     <ClCompile Include="FNVHash.cpp" />
     <ClCompile Include="IatHookHelper.cpp" />

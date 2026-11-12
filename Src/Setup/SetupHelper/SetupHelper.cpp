@@ -6,31 +6,38 @@
 #define _ATL_CSTRING_EXPLICIT_CONSTRUCTORS	// some CString constructors will be explicit
 #include <windows.h>
 #include <atlstr.h>
+#include <cwchar>
 #include "ResourceHelper.h"
 #include "../ExplorerShell.h"
+#include "CacheMaintenance.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 
 int ExitStartMenu(const wchar_t* regPath, const wchar_t* exeName, const wchar_t* updaterClass)
 {
 	HKEY hKey=NULL;
-	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,regPath,0,NULL,REG_OPTION_NON_VOLATILE,KEY_READ|KEY_QUERY_VALUE|KEY_WOW64_64KEY,NULL,&hKey,NULL)==ERROR_SUCCESS)
+	if (RegOpenKeyEx(HKEY_LOCAL_MACHINE,regPath,0,KEY_READ|KEY_WOW64_64KEY,&hKey)==ERROR_SUCCESS)
 	{
 		DWORD type=0;
-		wchar_t path[_MAX_PATH];
+		wchar_t path[_MAX_PATH]={};
 		DWORD size=sizeof(path);
-		if (RegQueryValueEx(hKey,L"Path",0,&type,(BYTE*)path,&size)==ERROR_SUCCESS && type==REG_SZ)
+		if (RegQueryValueEx(hKey,L"Path",0,&type,(BYTE*)path,&size)==ERROR_SUCCESS && type==REG_SZ && size>=sizeof(wchar_t) && size<=sizeof(path) && size%sizeof(wchar_t)==0 && path[size/sizeof(wchar_t)-1]==0)
 		{
 			STARTUPINFO startupInfo={sizeof(startupInfo)};
 			PROCESS_INFORMATION processInfo;
 			memset(&processInfo,0,sizeof(processInfo));
-			wcscat_s(path,exeName);
+			if (wcscat_s(path,exeName)!=0)
+			{
+				RegCloseKey(hKey);
+				return 1;
+			}
 			HANDLE h=CreateFile(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
 			if (h!=INVALID_HANDLE_VALUE)
 			{
 				CloseHandle(h);
-				wcscat_s(path,L" -exit");
-				if (CreateProcess(NULL,path,NULL,NULL,TRUE,0,NULL,NULL,&startupInfo,&processInfo))
+				wchar_t commandLine[2*_MAX_PATH];
+				swprintf_s(commandLine,L"\"%s\" -exit",path);
+				if (CreateProcess(path,commandLine,NULL,NULL,FALSE,0,NULL,NULL,&startupInfo,&processInfo))
 				{
 					CloseHandle(processInfo.hThread);
 					WaitForSingleObject(processInfo.hProcess,5000);
@@ -77,6 +84,7 @@ int FixVersion( void )
 //   fixVersion // sets the correct OS version
 //   exitExplorer // WinSlim: stops this session's Explorer before files are replaced
 //   startExplorer // WinSlim: restarts the Explorer stopped by exitExplorer, once
+//   clearCaches // WinSlim: purges only this user's regenerable caches; retries locked files on startup
 
 int WINAPI wWinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrCmdLine, int nCmdShow )
 {
@@ -95,6 +103,13 @@ int WINAPI wWinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
 		if (_wcsicmp(params[0],L"fixVersion")==0)
 		{
 			return FixVersion();
+		}
+		if (_wcsicmp(params[0],L"clearCaches")==0)
+		{
+			HRESULT hr=CoInitialize(NULL);
+			DWORD result=OpenShellCache::MaintainCurrentUser(true);
+			if (SUCCEEDED(hr)) CoUninitialize();
+			return (int)result;
 		}
 		if (_wcsicmp(params[0],L"exitExplorer")==0)
 		{

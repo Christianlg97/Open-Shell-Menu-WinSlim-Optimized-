@@ -249,7 +249,10 @@ void CSetting::LoadValue( CRegKey &regSettings, CRegKey &regSettingsUser, CRegKe
 		flags|=CSetting::FLAG_DEFAULT;
 	flags&=~CSetting::FLAG_LOCKED_REG;
 	value=defValue;
-	flags&=~CSetting::FLAG_FORCED_DEFAULT;
+	if (flags&CSetting::FLAG_PROFILE_DEFAULT)
+		flags|=CSetting::FLAG_FORCED_DEFAULT;
+	else
+		flags&=~CSetting::FLAG_FORCED_DEFAULT;
 
 	wchar_t name2[256];
 
@@ -365,6 +368,7 @@ public:
 	void SaveSettings( bool bShared );
 	void LoadSettings( bool bShared );
 	CString LoadSettingsXml( const wchar_t *fname );
+	CString ReadSettingsXml( const wchar_t *fname, bool bDefaults );
 	CString SaveSettingsXml( const wchar_t *fname );
 	void ResetSettings( void );
 
@@ -478,6 +482,19 @@ void CSettingsManager::Init( CSetting *pSettings, TSettingsComponent component, 
 		pSetting->value=pSetting->defValue;
 		if (!(pSetting->flags&CSetting::FLAG_NODEFAULT))
 			pSetting->flags|=CSetting::FLAG_DEFAULT;
+	}
+	if (component==COMPONENT_MENU)
+	{
+		// Read once during initialization. HKLM/HKCU settings and policies below
+		// retain their normal priority; no user registry values are imported.
+		wchar_t profile[_MAX_PATH];
+		DWORD length=GetModuleFileName(g_Instance,profile,_countof(profile));
+		if (length && length<_countof(profile))
+		{
+			PathRemoveFileSpec(profile);
+			if (PathAppend(profile,L"WinSlim\\MenuSettings.xml") && GetFileAttributes(profile)!=INVALID_FILE_ATTRIBUTES)
+				ReadSettingsXml(profile,true);
+		}
 	}
 	LoadSettings(false);
 	LoadSettings(true);
@@ -702,10 +719,21 @@ static CComBSTR g_bstrTab(L"\n\t");
 CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 {
 	CSettingsLockWrite lock;
+	return ReadSettingsXml(fname,false);
+}
+
+CString CSettingsManager::ReadSettingsXml( const wchar_t *fname, bool bDefaults )
+{
+	Assert(g_LockState==2);
 	CComPtr<IXMLDOMDocument> pDoc;
 	if (FAILED(pDoc.CoCreateInstance(L"Msxml2.FreeThreadedDOMDocument")))
 		return L"Failed to initialize XML parser";
 	pDoc->put_async(VARIANT_FALSE);
+	if (bDefaults)
+	{
+		pDoc->put_resolveExternals(VARIANT_FALSE);
+		pDoc->put_validateOnParse(VARIANT_FALSE);
+	}
 	VARIANT_BOOL loaded;
 	if (pDoc->load(CComVariant(fname),&loaded)!=S_OK || loaded!=VARIANT_TRUE)
 	{
@@ -749,7 +777,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 		}
 	}
 
-	ResetSettings();
+	if (!bDefaults) ResetSettings();
 	CComPtr<IXMLDOMNode> child;
 	node->get_firstChild(&child);
 	while (child)
@@ -765,6 +793,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 			{
 				if (pSetting->flags&(CSetting::FLAG_LOCKED_REG|CSetting::FLAG_SHARED))
 					break;
+				bool imported=false;
 				if (pSetting->type==CSetting::TYPE_MULTISTRING)
 				{
 					// load Lines
@@ -789,6 +818,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 					string.push_back(0);
 					pSetting->value=CComVariant(&string[0]);
 					pSetting->flags&=~CSetting::FLAG_DEFAULT;
+					imported=true;
 				}
 				else
 				{
@@ -802,6 +832,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 							{
 								pSetting->value=value;
 								pSetting->flags&=~CSetting::FLAG_DEFAULT;
+								imported=true;
 							}
 							else if (pSetting->type==CSetting::TYPE_BOOL || (pSetting->type==CSetting::TYPE_INT && pSetting[1].type!=CSetting::TYPE_RADIO) || pSetting->type==CSetting::TYPE_HOTKEY || pSetting->type==CSetting::TYPE_HOTKEY_ANY || pSetting->type==CSetting::TYPE_COLOR)
 							{
@@ -811,6 +842,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 								else
 									pSetting->value=CComVariant(val);
 								pSetting->flags&=~CSetting::FLAG_DEFAULT;
+								imported=true;
 							}
 							else if (pSetting->type==CSetting::TYPE_INT && pSetting[1].type==CSetting::TYPE_RADIO)
 							{
@@ -821,12 +853,29 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 									{
 										pSetting->value=CComVariant(val);
 										pSetting->flags&=~CSetting::FLAG_DEFAULT;
+										imported=true;
 										break;
 									}
 								}
 							}
 						}
 					}
+				}
+				if (bDefaults && imported)
+				{
+					if (wcscmp(pSetting->name,L"StartButtonPath")==0)
+					{
+						wchar_t button[_MAX_PATH];
+						DWORD length=GetModuleFileName(g_Instance,button,_countof(button));
+						if (length && length<_countof(button))
+						{
+							PathRemoveFileSpec(button);
+							if (PathAppend(button,L"WinSlim\\StartButton.bmp") && GetFileAttributes(button)!=INVALID_FILE_ATTRIBUTES)
+								pSetting->value=CComVariant(button);
+						}
+					}
+					pSetting->defValue=pSetting->value;
+					pSetting->flags|=CSetting::FLAG_PROFILE_DEFAULT|CSetting::FLAG_FORCED_DEFAULT|CSetting::FLAG_DEFAULT;
 				}
 			}
 		}
@@ -836,6 +885,7 @@ CString CSettingsManager::LoadSettingsXml( const wchar_t *fname )
 			break;
 		child=std::move(next);
 	}
+	if (bDefaults) return CString();
 	if (ver<0x03090000)
 		UpgradeSettings(false);
 	UpdateSettings();
@@ -2174,6 +2224,13 @@ void UpdateSetting( const wchar_t *name, const CComVariant &defValue, bool bLock
 		pSetting->flags|=CSetting::FLAG_LOCKED_GP|CSetting::FLAG_DEFAULT;
 	else
 		pSetting->flags&=~CSetting::FLAG_LOCKED_GP;
+	if (bLockedGP && (pSetting->flags&CSetting::FLAG_PROFILE_DEFAULT))
+	{
+		// Windows restrictions take priority without replacing the editable
+		// profile default, so removing a restriction restores that default.
+		pSetting->value=defValue;
+		return;
+	}
 	if (!(pSetting->flags&CSetting::FLAG_FORCED_DEFAULT))
 		pSetting->defValue=defValue;
 	if (pSetting->flags&CSetting::FLAG_DEFAULT)

@@ -32,8 +32,6 @@ static int g_FileLinks[]=
 	IDC_SYSLINKSTART,
 	IDC_SYSLINKCACHE,
 	IDC_SYSLINKSTARTUP,
-	IDC_SYSLINKEXPLORER,
-	IDC_SYSLINKIE,
 };
 
 class CLoggingDialog: public CDialogImpl<CLoggingDialog>
@@ -51,10 +49,6 @@ public:
 		NOTIFY_HANDLER( IDC_SYSLINKCACHE, NM_RETURN, OnLink )
 		NOTIFY_HANDLER( IDC_SYSLINKSTARTUP, NM_CLICK, OnLink )
 		NOTIFY_HANDLER( IDC_SYSLINKSTARTUP, NM_RETURN, OnLink )
-		NOTIFY_HANDLER( IDC_SYSLINKEXPLORER, NM_CLICK, OnLink )
-		NOTIFY_HANDLER( IDC_SYSLINKEXPLORER, NM_RETURN, OnLink )
-		NOTIFY_HANDLER( IDC_SYSLINKIE, NM_CLICK, OnLink )
-		NOTIFY_HANDLER( IDC_SYSLINKIE, NM_RETURN, OnLink )
 		REFLECT_NOTIFICATIONS()
 	END_MSG_MAP()
 
@@ -100,10 +94,6 @@ CString CLoggingDialog::GetPathForLink( int link )
 		path=L"%LOCALAPPDATA%\\OpenShell\\DataCache.txt";
 	else if (link==IDC_SYSLINKSTARTUP)
 		path=L"%LOCALAPPDATA%\\OpenShell\\StartupLog.txt";
-	else if (link==IDC_SYSLINKEXPLORER)
-		path=L"%LOCALAPPDATA%\\OpenShell\\ExplorerLog.txt";
-	else if (link==IDC_SYSLINKIE)
-		path=L"%LOCALAPPDATA%\\OpenShell\\ClassicIELog.txt";
 	else
 		return CString();
 
@@ -125,14 +115,6 @@ LRESULT CLoggingDialog::OnInitDialog( UINT uMsg, WPARAM wParam, LPARAM lParam, B
 	log=GetSetting(L"Software\\OpenShell\\StartMenu\\Settings",L"LogStartup");
 	if (log)
 		CheckDlgButton(IDC_CHECKSTARTUP,BST_CHECKED);
-
-	log=GetSetting(L"Software\\OpenShell\\ClassicExplorer\\Settings",L"LogLevel");
-	if (log)
-		CheckDlgButton(IDC_CHECKEXPLORER,BST_CHECKED);
-
-	log=GetSetting(L"Software\\OpenShell\\ClassicIE\\Settings",L"LogLevel");
-	if (log)
-		CheckDlgButton(IDC_CHECKIE,BST_CHECKED);
 
 	CWindow tooltip;
 	tooltip.Create(TOOLTIPS_CLASS,m_hWnd,NULL,NULL,WS_POPUP|TTS_NOPREFIX);
@@ -166,20 +148,6 @@ LRESULT CLoggingDialog::OnOK( WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& bH
 	if (log!=GetSetting(L"Software\\OpenShell\\StartMenu\\Settings",L"LogStartup"))
 	{
 		SetSetting(L"Software\\OpenShell\\StartMenu\\Settings",L"LogStartup",log);
-		res=1;
-	}
-
-	log=IsDlgButtonChecked(IDC_CHECKEXPLORER)==BST_CHECKED?1:0;
-	if (log!=GetSetting(L"Software\\OpenShell\\ClassicExplorer\\Settings",L"LogLevel"))
-	{
-		SetSetting(L"Software\\OpenShell\\ClassicExplorer\\Settings",L"LogLevel",log);
-		res=1;
-	}
-
-	log=IsDlgButtonChecked(IDC_CHECKIE)==BST_CHECKED?1:0;
-	if (log!=GetSetting(L"Software\\OpenShell\\ClassicIE\\Settings",L"LogLevel"))
-	{
-		SetSetting(L"Software\\OpenShell\\ClassicIE\\Settings",L"LogLevel",log);
 		res=1;
 	}
 

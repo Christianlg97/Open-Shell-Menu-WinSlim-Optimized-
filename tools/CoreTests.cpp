@@ -4,15 +4,70 @@
 #include <vector>
 #include <iostream>
 #include "../Src/Lib/RustCore.h"
+#include "../Src/Lib/CacheMaintenance.h"
 
 static void Require(bool passed, const char *message)
 {
 	if (!passed) { std::cerr << message << std::endl; ExitProcess(1); }
 }
 
+static void CheckCacheMaintenance()
+{
+	wchar_t temp[MAX_PATH],base[MAX_PATH];
+	DWORD length=GetTempPathW(MAX_PATH,temp);
+	Require(length>0 && length<MAX_PATH,"No temporary directory");
+	Require(GetTempFileNameW(temp,L"osc",0,base)!=0,"No isolated cache test path");
+	Require(DeleteFileW(base) && CreateDirectoryW(base,NULL),"No isolated cache test directory");
+	std::wstring folder=std::wstring(base)+L"\\OpenShell";
+	Require(CreateDirectoryW(folder.c_str(),NULL)!=FALSE,"No isolated OpenShell directory");
+	auto path=[&](const wchar_t *name) { return folder+L"\\"+name; };
+	auto exists=[&](const wchar_t *name) { return GetFileAttributesW(path(name).c_str())!=INVALID_FILE_ATTRIBUTES; };
+	auto create=[&](const wchar_t *name)
+	{
+		OpenShellCache::Handle file(CreateFileW(path(name).c_str(),GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL));
+		Require(file.Valid(),"Could not create isolated cache fixture");
+		DWORD written=0;
+		Require(WriteFile(file,"keep",4,&written,NULL) && written==4,"Could not write cache fixture");
+	};
+	for (const wchar_t *name:OpenShellCache::Files) create(name);
+	create(L"MenuSettings.xml");
+	create(L"StartupLog.txt");
+	Require(CreateDirectoryW(path(L"Pinned").c_str(),NULL)!=FALSE,"No test pins directory");
+	create(L"Pinned\\Example.lnk");
+	Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-1",false)==ERROR_SUCCESS,"Initial purge failed");
+	for (const wchar_t *name:OpenShellCache::Files) Require(!exists(name),"Regenerable cache retained");
+	Require(exists(L"MenuSettings.xml") && exists(L"Pinned\\Example.lnk") && exists(L"StartupLog.txt"),"User data removed");
+	Require(!exists(OpenShellCache::PendingName),"Successful purge left a pending request");
+	create(L"DataCache.db");
+	Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-1",false)==ERROR_SUCCESS && exists(L"DataCache.db"),"Warm cache deleted again");
+	{
+		OpenShellCache::Handle locked(CreateFileW(path(L"DataCache.db").c_str(),GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL));
+		Require(locked.Valid(),"Could not lock test cache");
+		Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-2",false)!=ERROR_SUCCESS,"Locked purge was reported complete");
+		Require(exists(OpenShellCache::PendingName) && exists(L"DataCache.db"),"Locked file/request lost");
+	}
+	Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-2",false)==ERROR_SUCCESS && !exists(L"DataCache.db"),"Deferred purge did not retry");
+	create(L"DataCache.txt");
+	create(OpenShellCache::PendingName);
+	Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-2",false)==ERROR_SUCCESS && !exists(L"DataCache.txt"),"VBS request ignored");
+	create(L"ModernSettings.dat");
+	Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-2",true)==ERROR_SUCCESS && !exists(L"ModernSettings.dat"),"Forced reinstall purge ignored");
+	Require(CreateDirectoryW(path(OpenShellCache::PendingName).c_str(),NULL)!=FALSE,"No invalid marker fixture");
+	create(L"DataCache.db");
+	Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-3",false)==ERROR_ACCESS_DENIED && exists(L"DataCache.db"),"Invalid pending marker accepted");
+	Require(RemoveDirectoryW(path(OpenShellCache::PendingName).c_str())!=FALSE,"Invalid marker removal failed");
+	Require(OpenShellCache::MaintainFolder(base,L"install-3",true)==ERROR_INVALID_NAME,"Arbitrary directory accepted for cleanup");
+	Require(OpenShellCache::MaintainFolder(folder.c_str(),L"install-3",false)==ERROR_SUCCESS,"Final purge failed");
+	for (const wchar_t *name:{L"MenuSettings.xml",L"StartupLog.txt",L"Pinned\\Example.lnk",OpenShellCache::StateName,L"CacheMaintenance.lock"})
+		Require(DeleteFileW(path(name).c_str())!=FALSE,"Test fixture cleanup failed");
+	Require(RemoveDirectoryW(path(L"Pinned").c_str()) && RemoveDirectoryW(folder.c_str()) && RemoveDirectoryW(base),"Test directory cleanup failed");
+	std::cout << "Cache purge, locked-file retry and user data preservation checks passed" << std::endl;
+}
+
 int main()
 {
 	static_assert(sizeof(wchar_t)==2,"The C ABI uses UTF-16 code units");
+	CheckCacheMaintenance();
 	Require(WinSlimCheckedSpan(-1,2,32767,UINT64_MAX)==UINT64_MAX,"Negative cache length accepted");
 	Require(WinSlimCheckedSpan(32768,2,32767,UINT64_MAX)==UINT64_MAX,"Oversized string accepted");
 	Require(WinSlimCheckedSpan(8,2,32767,15)==UINT64_MAX,"Truncated record accepted");

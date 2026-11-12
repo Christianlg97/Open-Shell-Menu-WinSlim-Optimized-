@@ -19,6 +19,7 @@
 #include "MenuContainer.h"
 #include "SearchManager.h"
 #include "LogManager.h"
+#include "CacheMaintenance.h"
 #include <dwmapi.h>
 
 #pragma comment(linker, \
@@ -50,6 +51,8 @@ static HANDLE g_DllInitThread;
 static DWORD CALLBACK DllInitThread( void* )
 {
 	CoInitialize(NULL);
+	// Run before any manager opens a cache; never invalidate live icons/PIDLs.
+	OpenShellCache::MaintainCurrentUser();
 	InitSettings();
 
 	wchar_t path[_MAX_PATH];

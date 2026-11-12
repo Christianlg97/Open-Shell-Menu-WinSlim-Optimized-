@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '4.4.1001',
+    [string]$Version = '4.4.1004',
     [ValidateSet('English','Spanish','French','German','Italian','Polish','Russian','ChineseCN','ChineseTW')]
     [string]$Language = 'English',
     [switch]$Full,
@@ -73,9 +73,15 @@ try {
         $python = Get-Command python.exe -ErrorAction SilentlyContinue
         if (-not $python) { throw 'Python 3 is required for the static and native regression checks; install it or explicitly use -SkipTests.' }
         & $python.Source (Join-Path $PSScriptRoot 'verify.py')
+        if ($LASTEXITCODE -ne 0) { throw 'Source checks failed' }
+        & $python.Source (Join-Path $PSScriptRoot 'Test-InstallerSource.py')
         if ($LASTEXITCODE -ne 0) { throw 'Regression checks failed.' }
+        & $python.Source (Join-Path $PSScriptRoot 'Test-WinSlimProfile.py')
+        if ($LASTEXITCODE -ne 0) { throw 'WinSlim profile or bundled assets checks failed.' }
         & $python.Source (Join-Path $PSScriptRoot 'Test-BitmapCache.py')
         if ($LASTEXITCODE -ne 0) { throw 'Bitmap cache orientation regression failed.' }
+        & $python.Source (Join-Path $PSScriptRoot 'Test-OpenShellCaches.py')
+        if ($LASTEXITCODE -ne 0) { throw 'Open-Shell cache maintenance regression failed.' }
     }
     function Invoke-SetupScript([string]$Name) {
         Push-Location $setup

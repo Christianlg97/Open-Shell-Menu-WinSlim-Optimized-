@@ -133,11 +133,16 @@ class SourceRegressions(unittest.TestCase):
         self.assertNotIn("m_LastCacheSave=0", throttle)
         self.assertIn("CACHE_SAVE_INTERVAL-CACHE_RETRY_INTERVAL", throttle)
 
-    def test_automatic_update_check_is_off_by_default(self):
-        update_default = re.compile(r'\{L"Update",CSetting::TYPE_BOOL,0,0,(\d)')
-        for name in ("Src/Lib/DownloadHelper.cpp", "Src/Update/Update.cpp", "Src/StartMenu/StartMenuDLL/SettingsUI.cpp"):
+    def test_removed_modules_are_not_built_or_installed(self):
+        for folder in ("ClassicExplorer", "ClassicIE", "Update", "WinSlimDarkMode"):
+            self.assertFalse(list((ROOT / "Src" / folder).rglob("*.cpp")))
+            self.assertNotIn('= "' + folder + '"', source("Src/OpenShell.sln"))
+        self.assertFalse((ROOT / "Src/Lib/DownloadHelper.cpp").exists())
+        for name in ("Src/Setup/Setup.wxs", "Src/Setup/BuildBinaries.bat", "Src/Setup/BuildArchives.bat"):
             with self.subTest(name=name):
-                self.assertEqual(update_default.findall(source(name)), ["0"])
+                self.assertNotRegex(source(name), r"ClassicExplorer|ClassicIE|DesktopToasts|Update\.exe|WinSlimDarkMode")
+        self.assertNotIn("CheckForNewVersion", source("Src/StartMenu/StartMenuDLL/MenuContainer.cpp"))
+        self.assertNotRegex(source("Src/StartMenu/StartMenuDLL/SettingsUI.cpp"), r'\{L"Update",')
 
     def test_installer_restarts_explorer_once_and_unelevated(self):
         ns = {"w": "http://schemas.microsoft.com/wix/2006/wi"}
@@ -150,7 +155,8 @@ class SourceRegressions(unittest.TestCase):
         prop = next(p for p in product.findall("w:Property", ns) if p.get("Id") == "RESTARTEXPLORER")
         self.assertEqual((prop.get("Value"), prop.get("Secure")), ("1", "yes"))
         sequence = {c.get("Action"): c for c in product.find("w:InstallExecuteSequence", ns).findall("w:Custom", ns)}
-        self.assertEqual(sequence["StopExplorer"].get("Before"), "InstallValidate")
+        self.assertEqual(sequence["StopExplorer"].get("Before"), "CleanOpenShellCaches")
+        self.assertEqual(sequence["CleanOpenShellCaches"].get("Before"), "InstallValidate")
         self.assertEqual(sequence["CloseStartMenu"].get("Before"), "StopExplorer")
         self.assertEqual(sequence["StartExplorer"].get("After"), "InstallFinalize")
         self.assertEqual(sequence["StartExplorerRollback"].get("After"), "RemoveExistingProducts")
@@ -198,14 +204,17 @@ class SourceRegressions(unittest.TestCase):
         self.assertIn("/setintegritylevel M", build)
         self.assertIn("finally { Reset-WinSlimMsiIntegrity }", build)
 
-    def test_update_signature_is_mandatory(self):
-        text = source("Src/Lib/DownloadHelper.cpp")
-        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-        worker = function_body(text, "static DWORD WINAPI ThreadDownloadFile", "DWORD DownloadNewVersion(")
-        self.assertIn("params.valid=VerifyDigitalCertificate(fname,params.signer)", worker)
-        self.assertNotIn("if (params.signer)", worker)
-        self.assertNotIn("lStatus!=CERT_E_EXPIRED", text)
-        self.assertIn("HTTP_QUERY_STATUS_CODE", text)
+    def test_installed_profile_is_an_editable_default(self):
+        settings=source("Src/Lib/Settings.cpp")
+        init=function_body(settings, "void CSettingsManager::Init(", "CSettingsManager::~CSettingsManager(")
+        self.assertLess(init.index("ReadSettingsXml(profile,true)"),init.index("LoadSettings(false)"))
+        reader=function_body(settings,"CString CSettingsManager::ReadSettingsXml(","static void SaveSettingValue(")
+        self.assertIn("if (!bDefaults) ResetSettings();",reader)
+        self.assertIn("pSetting->defValue=pSetting->value;",reader)
+        self.assertIn("if (bDefaults) return CString();",reader)
+        self.assertNotIn("SaveSettings(",reader)
+        self.assertNotIn("SetDWORDValue(",reader)
+        self.assertIn("FLAG_PROFILE_DEFAULT",source("Src/Lib/Settings.h"))
 
     def test_independent_msi_outputs(self):
         text = source("tools/Build.ps1")
@@ -221,6 +230,35 @@ class SourceRegressions(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Win32 regression")
 class NativeRegressions(unittest.TestCase):
+    def test_localization_version_resource_can_be_queried_and_copied(self):
+        kernel = C.WinDLL('kernel32', use_last_error=True)
+        version = C.WinDLL('version', use_last_error=True)
+        kernel.GetModuleHandleW.argtypes = [C.c_wchar_p]
+        kernel.GetModuleHandleW.restype = C.c_void_p
+        kernel.FindResourceW.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p]
+        kernel.FindResourceW.restype = C.c_void_p
+        kernel.LoadResource.argtypes = [C.c_void_p, C.c_void_p]
+        kernel.LoadResource.restype = C.c_void_p
+        kernel.SizeofResource.argtypes = [C.c_void_p, C.c_void_p]
+        kernel.SizeofResource.restype = C.c_uint32
+        kernel.LockResource.argtypes = [C.c_void_p]
+        kernel.LockResource.restype = C.c_void_p
+        version.VerQueryValueW.argtypes = [C.c_void_p, C.c_wchar_p, C.POINTER(C.c_void_p), C.POINTER(C.c_uint)]
+        version.VerQueryValueW.restype = C.c_int
+        module = kernel.GetModuleHandleW('kernel32.dll')
+        resource = kernel.FindResourceW(module, 1, 16)
+        self.assertTrue(resource)
+        data = kernel.LockResource(kernel.LoadResource(module, resource))
+        size = kernel.SizeofResource(module, resource)
+        copied = C.create_string_buffer(C.string_at(data, size))
+        values = []
+        for block in (data, C.cast(copied, C.c_void_p)):
+            pointer, length = C.c_void_p(), C.c_uint()
+            self.assertTrue(version.VerQueryValueW(block, '\\', C.byref(pointer), C.byref(length)))
+            self.assertGreaterEqual(length.value, 52)
+            values.append(C.string_at(pointer, 52))
+        self.assertEqual(values[0], values[1])
+
     def test_ansi_spanish_conversion(self):
         kernel = C.WinDLL("kernel32", use_last_error=True)
         convert = kernel.MultiByteToWideChar
