@@ -1,5 +1,19 @@
 # Revisión del código — 12 de noviembre de 2026
 
+## Verificación de los paquetes 4.4.1006 y consumo observado
+
+Se han verificado los MSI x86/x64/ARM64 existentes en `Release` mediante
+extracción de sus recursos, sin instalar: contienen el XML actual, el BMP
+personalizado y ambas skins Fluent-Metro, idénticos a las fuentes. La DLL
+cargada en la sesión actual informa 4.4.1006. Esto actualiza el estado de los
+binarios indicado en las secciones históricas siguientes.
+
+El [análisis de rendimiento](PERFORMANCE_WINSLIM.md) documenta una muestra de
+30 segundos, las dependencias de WSCore y cinco oportunidades de mejora.
+El verificador del build comprueba ahora hashes y destinos reales del perfil.
+No se ha compilado ni cambiado el motor en esta revisión; el comportamiento
+de primer inicio con usuario nuevo sigue necesitando una prueba de instalación.
+
 ## Primer clic después de instalar (4.4.1006)
 
 El vídeo `VideoBugPrueba_OpenShell_4.4.1005.mp4` muestra un borde blanco curvo

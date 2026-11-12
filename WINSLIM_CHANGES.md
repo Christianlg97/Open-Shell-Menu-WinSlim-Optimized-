@@ -10,6 +10,13 @@ del perfil original. Consultar [la revisión actual](AUDIT_WINSLIM.md) para
 los fallos corregidos y las validaciones pendientes. Las secciones históricas
 de este documento sobre el actualizador describen código ya retirado.
 
+La [revisión de empaquetado y rendimiento](PERFORMANCE_WINSLIM.md) verifica los
+MSI 4.4.1006 ya generados: XML, botón y Fluent-Metro coinciden con las fuentes.
+`Verify-Msi.ps1` comprueba ahora también el contenido SHA-256 de los CAB,
+carpetas de destino y pertenencia incondicional al menú instalado por defecto.
+`Measure-MenuPerformance.ps1` permite registrar CPU y memoria sin modificar
+la sesión. Esta revisión no cambia el motor ni requiere un nuevo binario.
+
 Las instalaciones y reparaciones regeneran las cachés del menú sin restablecer
 preferencias ni accesos anclados. El VBS de WinSlim puede programar también esa
 limpieza, como máximo cada 30 días y sin cerrar el menú durante el mantenimiento.

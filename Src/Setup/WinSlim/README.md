@@ -63,6 +63,20 @@ Las pruebas verifican tipos y opciones del XML, conservación del perfil origina
 hashes, los tres estados del botón, recursos cargables de las skins y los textos
 Unicode leídos con MSXML. No compilan el proyecto ni modifican el registro.
 
+`tools/Verify-Msi.ps1`, ejecutado por el build para cada MSI, también extrae
+únicamente estos cuatro recursos de los CAB incrustados a una carpeta temporal
+y compara su SHA-256 con las fuentes. Comprueba que pertenecen a la característica
+StartMenu instalada por defecto, sin condiciones, y que las carpetas de destino
+dependen de APPLICATIONFOLDER. Una referencia en la tabla File ya no basta para
+dar el paquete por válido: se comprueban los bytes que se distribuirán. No usa
+`msiexec`, no instala y no ejecuta acciones personalizadas.
+
+El 12 de noviembre se verificaron los MSI **4.4.1006 x86, x64 y ARM64** existentes
+en `Release`: los cuatro recursos coinciden byte por byte con las fuentes.
+El BMP y las skins también coinciden con la instalación actual del equipo.
+El [análisis de rendimiento](../../../PERFORMANCE_WINSLIM.md) incluye una muestra
+del build instalado y las oportunidades de mejora pendientes de medir.
+
 Tras compilar e instalar, comprobar con un usuario nuevo y otro ya configurado:
 primer clic, elección y restauración de ajustes, iconos, animaciones, búsquedas y
 accesos. La validación del nuevo código C++ en ejecución corresponde a ese build.
