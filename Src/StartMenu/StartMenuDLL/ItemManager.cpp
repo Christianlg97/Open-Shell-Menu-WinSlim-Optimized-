@@ -5,6 +5,7 @@
 #include "stdafx.h"
 #include "ItemManager.h"
 #include "RustCore.h"
+#include "DirectoryChangeBatch.h"
 #include "MetroLinkManager.h"
 #include "FNVHash.h"
 #include "Settings.h"
@@ -127,17 +128,17 @@ extern PROPERTYKEY PKEY_MetroPackageName;
 
 static CComPtr<IApplicationResolver> g_pAppResolver;
 
-// Creates the app id resolver object
-static void CreateAppResolver( void )
+// Creates the app id resolver in the calling COM apartment.
+static void CreateAppResolver( CComPtr<IApplicationResolver> &resolver )
 {
 	if (GetWinVersion()>=WIN_VER_WIN7)
 	{
 		CComPtr<IUnknown> pUnknown;
 		pUnknown.CoCreateInstance(CLSID_ApplicationResolver);
 		if (GetWinVersion()==WIN_VER_WIN7)
-			g_pAppResolver=CComQIPtr<IApplicationResolver,&IID_IApplicationResolver7>(pUnknown);
+			resolver=CComQIPtr<IApplicationResolver,&IID_IApplicationResolver7>(pUnknown);
 		else
-			g_pAppResolver=CComQIPtr<IApplicationResolver,&IID_IApplicationResolver8>(pUnknown);
+			resolver=CComQIPtr<IApplicationResolver,&IID_IApplicationResolver8>(pUnknown);
 	}
 }
 
@@ -2026,13 +2027,23 @@ void CItemManager::RefreshItemInfo( ItemInfo *pInfo, int refreshFlags, IShellIte
 
 				if (newInfo.bLink && newInfo.appid.IsEmpty() && (refreshFlags&INFO_LINK_APPID))
 				{
-					Assert(GetCurrentThreadId()==m_MainThreadId);
-					if (!g_pAppResolver)
-						CreateAppResolver();
-					if (g_pAppResolver)
+					CComPtr<IApplicationResolver> resolver;
+					if (GetCurrentThreadId()==m_MainThreadId)
+					{
+						if (!g_pAppResolver) CreateAppResolver(g_pAppResolver);
+						resolver=g_pAppResolver;
+					}
+					else
+					{
+						// Workers must not borrow the UI apartment's COM pointer. A local
+						// resolver is released here, before the worker uninitializes COM.
+						// ItemInfo caches the resulting AppID for subsequent searches.
+						CreateAppResolver(resolver);
+					}
+					if (resolver)
 					{
 						CComString pAppId;
-						if (SUCCEEDED(g_pAppResolver->GetAppIDForShortcut(pItem,&pAppId)))
+						if (SUCCEEDED(resolver->GetAppIDForShortcut(pItem,&pAppId)))
 							newInfo.appid=pAppId;
 					}
 				}
@@ -2892,7 +2903,7 @@ const int NUM_WATCHED_DIRS=7;
 void CItemManager::PreloadItemsThread( void )
 {
 	int dirCount=0;
-	HANDLE handles[NUM_WATCHED_DIRS+1];
+	HANDLE handles[NUM_WATCHED_DIRS];
 	DWORD dirMasks[NUM_WATCHED_DIRS]={0};
 	DWORD dirMask=0xFFFFFFFF;
 	while (1)
@@ -2970,19 +2981,7 @@ void CItemManager::PreloadItemsThread( void )
 		}
 		if (dirMask==0xFFFFFFFF)
 			SetEvent(m_DoneEvent);
-		if (dirCount==0)
-			break;
-		handles[dirCount]=m_ExitEvent;
-		DWORD wait=WaitForMultipleObjects(dirCount+1,handles,FALSE,INFINITE);
-		if (wait<WAIT_OBJECT_0 || wait>WAIT_OBJECT_0+dirCount-1)
-			break;
-
-		int dir=wait-WAIT_OBJECT_0;
-		dirMask=dirMasks[dir];
-
-		if (!FindNextChangeNotification(handles[dir]))
-			ResetEvent(handles[dir]); // so we don't wake on this event again
-		Sleep(1000); // hopefully whatever file operation is in progress will finish in a second
+		if (!OpenShellFolders::WaitForChanges(m_ExitEvent,handles,dirMasks,dirCount,dirMask)) break;
 	}
 	for (int i=0;i<dirCount;i++)
 		FindCloseChangeNotification(handles[i]);

@@ -1,6 +1,6 @@
 # Open-Shell para WinSlim: cambios y compilación
 
-La versión actual por defecto es **4.4.1006**. Classic Explorer, Classic IE y
+La versión actual por defecto es **4.4.1007**. Classic Explorer, Classic IE y
 Open-Shell Update se han retirado de los proyectos y del instalador. Se conserva
 el menú, sus skins, idiomas y extensiones necesarias. El módulo Dark Mode se ha
 retirado completamente. El [perfil de WinSlim](Src/Setup/WinSlim/README.md) se
@@ -15,7 +15,15 @@ MSI 4.4.1006 ya generados: XML, botón y Fluent-Metro coinciden con las fuentes.
 `Verify-Msi.ps1` comprueba ahora también el contenido SHA-256 de los CAB,
 carpetas de destino y pertenencia incondicional al menú instalado por defecto.
 `Measure-MenuPerformance.ps1` permite registrar CPU y memoria sin modificar
-la sesión. Esta revisión no cambia el motor ni requiere un nuevo binario.
+la sesión. Esa revisión de empaquetado no necesitó un nuevo binario.
+
+La revisión **4.4.1007** sí cambia el motor: catálogos de búsqueda compartidos
+e inmutables, ordenación/AppID fuera de la interfaz, deduplicación de ajustes
+por conjunto, trabajadores creados a demanda, avisos de carpetas agrupados con
+espera cancelable y seguimiento del botón por eventos. Conserva el perfil y
+sus recursos visuales. Las comprobaciones estáticas pasan; las pruebas nativas
+añadidas a `CoreTests` se ejecutarán al compilar. Falta medir el ahorro con el
+binario nuevo. Los paquetes existentes siguen siendo 4.4.1006.
 
 Las instalaciones y reparaciones regeneran las cachés del menú sin restablecer
 preferencias ni accesos anclados. El VBS de WinSlim puede programar también esa
@@ -34,7 +42,7 @@ Desde CMD en la carpeta del proyecto:
 
 ```bat
 .\build.cmd
-.\build.cmd -Version 4.4.1006 -Language Spanish
+.\build.cmd -Version 4.4.1007 -Language Spanish
 ```
 
 Al abrir `build.cmd` con doble clic, la ventana espera una tecla al terminar,

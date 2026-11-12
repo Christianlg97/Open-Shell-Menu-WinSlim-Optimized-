@@ -42,6 +42,7 @@ public:
 		MESSAGE_HANDLER( WM_CLOSE, OnClose )
 		MESSAGE_HANDLER( WM_MOUSEACTIVATE, OnMouseActivate )
 		MESSAGE_HANDLER( WM_MOUSEMOVE, OnMouseMove )
+		MESSAGE_HANDLER( WM_MOUSELEAVE, OnMouseLeave )
 		MESSAGE_HANDLER( WM_ERASEBKGND, OnEraseBkgnd )
 		MESSAGE_HANDLER( WM_TIMER, OnTimer )
 		MESSAGE_HANDLER( WM_SETTINGCHANGE, OnSettingChange )
@@ -65,6 +66,7 @@ protected:
 	LRESULT OnEraseBkgnd( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled ) { return 1; }
 	LRESULT OnMouseActivate( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled ) { return MA_NOACTIVATE; }
 	LRESULT OnMouseMove( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled );
+	LRESULT OnMouseLeave( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled );
 	LRESULT OnTimer( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled );
 	LRESULT OnSettingChange( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled );
 	LRESULT OnThemeChanged( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled );
@@ -169,6 +171,7 @@ LRESULT CStartButton::OnDestroy( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& 
 	if (m_Theme) CloseThemeData(m_Theme);
 	m_Tooltip.DestroyWindow();
 	KillTimer(TIMER_BLEND);
+	KillTimer(TIMER_LEAVE);
 	bHandled=FALSE;
 	return 0;
 }
@@ -326,15 +329,38 @@ void CStartButton::SetHot( bool bHot )
 
 LRESULT CStartButton::OnMouseMove( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled )
 {
-	SetTimer(TIMER_LEAVE,30);
+	if (!m_bTrackMouse)
+	{
+		TRACKMOUSEEVENT track={sizeof(track),TME_LEAVE,m_hWnd,0};
+		m_bTrackMouse=TrackMouseEvent(&track)!=FALSE;
+	}
+	if (m_bTrackMouse)
+		KillTimer(TIMER_LEAVE);
+	else
+		SetTimer(TIMER_LEAVE,30); // preserve hover if event tracking fails
 	SetHot(true);
+	return 0;
+}
+
+LRESULT CStartButton::OnMouseLeave( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled )
+{
+	m_bTrackMouse=false;
+	// The clickable corner can extend outside our window onto the taskbar.
+	// Only that compatibility area still needs the existing polling fallback.
+	if (PointAroundStartButton(m_TaskbarId))
+		SetTimer(TIMER_LEAVE,30);
+	else
+	{
+		KillTimer(TIMER_LEAVE);
+		SetHot(false);
+	}
 	return 0;
 }
 
 void CStartButton::TaskBarMouseMove( void )
 {
 	SetHot(true);
-	SetTimer(CStartButton::TIMER_LEAVE,30);
+	if (!m_bTrackMouse) SetTimer(CStartButton::TIMER_LEAVE,30);
 }
 
 LRESULT CStartButton::OnTimer( UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled )

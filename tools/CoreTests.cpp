@@ -64,10 +64,14 @@ static void CheckCacheMaintenance()
 	std::cout << "Cache purge, locked-file retry and user data preservation checks passed" << std::endl;
 }
 
+#include "MenuPerformanceTests.h"
+
 int main()
 {
 	static_assert(sizeof(wchar_t)==2,"The C ABI uses UTF-16 code units");
 	CheckCacheMaintenance();
+	CheckSearchCatalogs();
+	CheckFolderBatches();
 	Require(WinSlimCheckedSpan(-1,2,32767,UINT64_MAX)==UINT64_MAX,"Negative cache length accepted");
 	Require(WinSlimCheckedSpan(32768,2,32767,UINT64_MAX)==UINT64_MAX,"Oversized string accepted");
 	Require(WinSlimCheckedSpan(8,2,32767,15)==UINT64_MAX,"Truncated record accepted");

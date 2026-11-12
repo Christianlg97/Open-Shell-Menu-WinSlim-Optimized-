@@ -5,6 +5,7 @@
 #include "stdafx.h"
 #include "SearchManager.h"
 #include "RustCore.h"
+#include "SearchCatalog.h"
 #include "MenuContainer.h"
 #include "MetroLinkManager.h"
 #include "Settings.h"
@@ -46,6 +47,8 @@ CSearchManager::CSearchManager( void )
 	m_LastCompletedId=0;
 	m_LastProgramsRequestId=0;
 	m_SearchThreadCount=0;
+	m_SearchThreadSlots=0;
+	m_SearchRequest.requestId=0;
 	m_bProgramsFound=m_bSettingsFound=false;
 	m_ProgramsHash=m_ProgramsHashOld=m_SettingsHash=m_SettingsHashOld=FNV_HASH0;
 }
@@ -68,13 +71,31 @@ void CSearchManager::Init( void )
 	// WAIT_FAILED otherwise becomes a tight loop in the worker when handle
 	// creation fails. Keep the locks usable so callers and Close remain safe.
 	if (!m_SearchEvent || !m_ExitEvent) return;
-	for (int i=0;i<_countof(m_SearchThreads);i++)
-		m_SearchThreads[i]=CreateThread(NULL,0,StaticSearchThread,this,0,NULL);
+	// Workers are created on demand by BeginSearch. An unused search box needs
+	// no thread stacks or COM apartments; busy providers can still use up to eight.
+}
+
+bool CSearchManager::EnsureSearchWorker( void )
+{
+	Assert(GetCurrentThreadId()==m_MainThreadId);
+	if (!m_SearchEvent || !m_ExitEvent) return false;
+	long busy=InterlockedCompareExchange(&m_SearchThreadCount,0,0);
+	if (busy>=m_SearchThreadSlots && m_SearchThreadSlots<_countof(m_SearchThreads))
+	{
+		HANDLE thread=CreateThread(NULL,0,StaticSearchThread,this,0,NULL);
+		if (thread) m_SearchThreads[m_SearchThreadSlots++]=thread;
+	}
+	return m_SearchThreadSlots>0;
 }
 
 void CSearchManager::Close( void )
 {
 	if (!m_bInitialized) return;
+	{
+		Lock lock(this,LOCK_DATA);
+		m_LastProgramsRequestId=++m_LastRequestId;
+		m_SearchRequest.requestId=0;
+	}
 	if (m_ExitEvent) SetEvent(m_ExitEvent);
 	for (int i=0;i<_countof(m_SearchThreads);i++)
 	{
@@ -83,6 +104,10 @@ void CSearchManager::Close( void )
 		CloseHandle(m_SearchThreads[i]);
 		m_SearchThreads[i]=NULL;
 	}
+	m_SearchThreadSlots=0;
+	m_SearchThreadCount=0;
+	m_ProgramCatalog.reset();
+	m_SettingsCatalog.reset();
 	if (m_SearchEvent) CloseHandle(m_SearchEvent);
 	if (m_ExitEvent) CloseHandle(m_ExitEvent);
 	m_SearchEvent=m_ExitEvent=NULL;
@@ -129,6 +154,17 @@ void CSearchManager::BeginSearch( const CString &searchText )
 
 		// initialize the request with unique ID
 		m_SearchRequest.requestId=++m_LastRequestId;
+		if (searchText.IsEmpty())
+		{
+			// Clearing the search cancels indexed work without waking/creating a worker.
+			m_SearchRequest.requestId=0;
+			m_IndexedItems.clear();
+			m_AutoCompleteItems.clear();
+			m_AutoCompletePath.Empty();
+			m_LastAutoCompletePath.Empty();
+			m_LastCompletedId=m_LastRequestId;
+			return;
+		}
 		m_SearchRequest.bSearchPrograms=GetSettingBool(L"SearchPrograms");
 		m_SearchRequest.bSearchPath=GetSettingBool(L"SearchPath");
 		m_SearchRequest.bSearchMetroApps=GetSettingBool(L"SearchMetroApps");
@@ -145,7 +181,13 @@ void CSearchManager::BeginSearch( const CString &searchText )
 		m_SearchRequest.searchText=searchText;
 		m_SearchRequest.autoCompletePath=ParseAutoCompletePath(searchText);
 	}
-	SetEvent(m_SearchEvent);
+	if (EnsureSearchWorker())
+		SetEvent(m_SearchEvent);
+	else
+	{
+		Lock lock(this,LOCK_DATA);
+		m_LastCompletedId=m_LastRequestId;
+	}
 }
 
 void CSearchManager::CloseMenu( void )
@@ -155,28 +197,30 @@ void CSearchManager::CloseMenu( void )
 	m_LastProgramsRequestId=m_LastRequestId;
 	if (g_LogCategories & LOG_SEARCH)
 	{
-		for (const auto& item : m_ProgramItems)
+		if (m_ProgramCatalog) for (const auto& item : *m_ProgramCatalog)
 		{
 			if (item.category == CATEGORY_PROGRAM)
 				LOG_MENU(LOG_SEARCH, L"Program: '%s', %d", item.name, item.rank);
 		}
 
-		std::sort(m_SettingsItems.begin(), m_SettingsItems.end());
-
-		for (const auto& item : m_SettingsItems)
+		std::vector<const SearchItem*> settings;
+		if (m_SettingsCatalog) for (const auto &item:*m_SettingsCatalog) settings.push_back(&item);
+		std::sort(settings.begin(),settings.end(),[](const SearchItem *a,const SearchItem *b) { return *a<*b; });
+		for (const SearchItem *entry : settings)
 		{
+			const SearchItem &item=*entry;
 			if (item.category == CATEGORY_SETTING)
 				LOG_MENU(LOG_SEARCH, L"Setting: '%s', %d", item.name, item.rank);
 		}
-		for (const auto& item : m_SettingsItems)
+		for (const SearchItem *entry : settings)
 		{
+			const SearchItem &item=*entry;
 			if (item.category == CATEGORY_METROSETTING)
 				LOG_MENU(LOG_SEARCH, L"MetroSetting: '%s', %d", item.name, item.rank);
 		}
 	}
 	if (m_bProgramsFound)
 	{
-		m_ProgramItemsOld.swap(m_ProgramItems);
 		m_ProgramsHashOld=m_ProgramsHash;
 	}
 	m_ProgramItems.clear();
@@ -185,10 +229,10 @@ void CSearchManager::CloseMenu( void )
 
 	if (m_bSettingsFound)
 	{
-		m_SettingsItemsOld.swap(m_SettingsItems);
 		m_SettingsHashOld=m_SettingsHash;
 	}
 	m_SettingsItems.clear();
+	m_SettingNames.clear();
 	m_SettingsHash=FNV_HASH0;
 	m_bSettingsFound=false;
 	m_bMetroSettingsFound = false;
@@ -215,8 +259,54 @@ unsigned int CSearchManager::CalcItemsHash( const std::vector<SearchItem> &items
 		hash=CalcFNVHash(&it->pInfo,sizeof(void*),hash);
 		hash=CalcFNVHash(&it->rank,sizeof(int),hash);
 		hash=CalcFNVHash(&it->bMetroLink,sizeof(bool),hash);
+		hash=CalcFNVHash(&it->duplicateGroup,sizeof(size_t),hash);
 	}
 	return hash;
+}
+
+bool CSearchManager::PublishSearchCatalog( bool programs, const SearchRequest &request )
+{
+	Assert(ThreadHasLock(LOCK_PROGRAMS));
+	auto catalog=std::make_shared<std::vector<SearchItem>>();
+	{
+		Lock lock(this,LOCK_DATA);
+		if (request.requestId<m_LastProgramsRequestId) return false;
+		catalog->swap(programs?m_ProgramItems:m_SettingsItems);
+		if (!programs) m_SettingNames.clear();
+	}
+	// Sort and resolve duplicate AppIDs on the worker, never on the menu thread
+	// or under LOCK_DATA. Moving the builder avoids another full catalog copy.
+	if (programs && !OpenShellSearch::PreparePrograms(*catalog,CATEGORY_PROGRAM,
+		[](const SearchItem &item) -> std::wstring
+		{
+			g_ItemManager.UpdateItemInfo(item.pInfo,CItemManager::INFO_LINK_APPID);
+			CItemManager::RWLock lock(&g_ItemManager,false,CItemManager::RWLOCK_ITEMS);
+			return std::wstring(item.pInfo->GetAppid());
+		},[&]() { return request.requestId<m_LastProgramsRequestId; })) return false;
+	unsigned int hash=CalcItemsHash(*catalog);
+	std::shared_ptr<const std::vector<SearchItem>> replacement=std::move(catalog);
+	bool refresh;
+	{
+		Lock lock(this,LOCK_DATA);
+		if (request.requestId<m_LastProgramsRequestId) return false;
+		if (programs)
+		{
+			m_ProgramCatalog.swap(replacement);
+			m_bProgramsFound=true;
+			m_ProgramsHash=hash;
+			refresh=(hash!=m_ProgramsHashOld);
+		}
+		else
+		{
+			m_SettingsCatalog.swap(replacement);
+			m_bSettingsFound=true;
+			m_SettingsHash=hash;
+			refresh=(hash!=m_SettingsHashOld);
+		}
+	}
+	// The previous generation is destroyed after releasing LOCK_DATA.
+	if (refresh) CMenuContainer::RefreshSearch();
+	return true;
 }
 
 void CSearchManager::LoadItemRanks( void )
@@ -357,6 +447,26 @@ bool CSearchManager::AddSearchItem( IShellItem *pItem, const wchar_t *name, int 
 		PropVariantClear(&val);
 	}
 
+	// A Shell provider may block or pump messages. Resolve ranking names before
+	// taking the data/rank locks, then validate the generation before publishing.
+	if (searchRequest.bUseRanks && (category==CATEGORY_PROGRAM || category==CATEGORY_SETTING || category==CATEGORY_METROSETTING))
+	{
+		CComString pName;
+		unsigned int hash;
+		if (SUCCEEDED(pItem->GetDisplayName(SIGDN_PARENTRELATIVEPARSING,&pName)))
+		{
+			pName.MakeUpper();
+			hash=CalcFNVHash(pName);
+		}
+		else
+			hash=CalcFNVHash(item.name);
+		Lock rankLock(this,LOCK_RANKS);
+		Assert(m_bRanksLoaded);
+		ItemRank rank(hash);
+		auto it=std::lower_bound(m_ItemRanks.begin()+1,m_ItemRanks.end(),rank);
+		if (it!=m_ItemRanks.end() && it->hash==rank.hash) item.rank=it->rank*2;
+	}
+
 	Lock lock(this,LOCK_DATA);
 	if (category==CATEGORY_PROGRAM || category==CATEGORY_SETTING || category==CATEGORY_METROSETTING)
 	{
@@ -374,34 +484,8 @@ bool CSearchManager::AddSearchItem( IShellItem *pItem, const wchar_t *name, int 
 		std::vector<SearchItem> &items=(category==CATEGORY_PROGRAM)?m_ProgramItems:m_SettingsItems;
 		if (category==CATEGORY_SETTING || category==CATEGORY_METROSETTING)
 		{
-			// remove duplicate settings
-			for (std::vector<SearchItem>::const_iterator it=items.begin();it!=items.end();++it)
-			{
-				if (wcscmp(it->name,item.name)==0 && it->bMetroLink==item.bMetroLink)
-				{
-					item.category=CATEGORY_INVALID;
-					break;
-				}
-			}
-		}
-
-		if (searchRequest.bUseRanks)
-		{
-			Lock lock(this,LOCK_RANKS);
-			Assert(m_bRanksLoaded);
-			unsigned int hash;
-			CComString pName;
-			if (SUCCEEDED(pItem->GetDisplayName(SIGDN_PARENTRELATIVEPARSING,&pName)))
-			{
-				pName.MakeUpper();
-				hash=CalcFNVHash(pName);
-			}
-			else
-				hash=CalcFNVHash(item.name);
-			ItemRank rank(hash);
-			std::vector<ItemRank>::const_iterator it=std::lower_bound(m_ItemRanks.begin()+1,m_ItemRanks.end(),rank);
-			if (it!=m_ItemRanks.end() && it->hash==rank.hash)
-				item.rank=it->rank*2;
+			if (!m_SettingNames.emplace(std::wstring(item.name),item.bMetroLink).second)
+				item.category=CATEGORY_INVALID;
 		}
 
 		items.push_back(item);
@@ -623,14 +707,16 @@ void CSearchManager::SearchThread( void )
 			if (searchRequest.searchText.IsEmpty() || wcsncmp(searchRequest.searchText,L"\\\\",2)==0)
 				continue;
 			Lock lock(this,LOCK_PROGRAMS);
-			if (searchRequest.requestId<m_LastProgramsRequestId)
-				continue;
-			if (m_ProgramItems.empty() && searchRequest.bSearchPrograms)
+			bool programsReady,settingsReady;
 			{
-				if (!m_ProgramItemsOld.empty())
-				{
-					CMenuContainer::RefreshSearch();
-				}
+				Lock dataLock(this,LOCK_DATA);
+				if (searchRequest.requestId<m_LastProgramsRequestId) continue;
+				programsReady=m_bProgramsFound;
+				settingsReady=m_bSettingsFound;
+			}
+			if (!programsReady && searchRequest.bSearchPrograms)
+			{
+				CMenuContainer::RefreshSearch(); // readers can use the previous catalog
 				// collect programs from the start menu
 				{
 					CComPtr<IShellItem> pFolder;
@@ -712,24 +798,13 @@ void CSearchManager::SearchThread( void )
 							continue;
 					}
 				}
-				bool bRefresh=false;
-				{
-					Lock lock(this,LOCK_DATA);
-					m_bProgramsFound=true;
-					m_ProgramsHash=CalcItemsHash(m_ProgramItems);
-					bRefresh=(m_ProgramsHash!=m_ProgramsHashOld);
-				}
-				if (bRefresh)
-					CMenuContainer::RefreshSearch();
+				if (!PublishSearchCatalog(true,searchRequest)) continue;
 				searchRequest.searchTime=GetTickCount();
 			}
 
-			if (m_SettingsItems.empty() && searchRequest.bSearchSettings)
+			if (!settingsReady && searchRequest.bSearchSettings)
 			{
-				if (!m_SettingsItemsOld.empty())
-				{
-					CMenuContainer::RefreshSearch();
-				}
+				CMenuContainer::RefreshSearch();
 				// collect items from the control panel, admin tools, and the god mode
 				{
 					CComPtr<IShellItem> pFolder;
@@ -769,15 +844,7 @@ void CSearchManager::SearchThread( void )
 						continue;
 				}
 			}
-			bool bRefresh=false;
-			{
-				Lock lock(this,LOCK_DATA);
-				m_bSettingsFound=true;
-				m_SettingsHash=CalcItemsHash(m_SettingsItems);
-				bRefresh=(m_SettingsHash!=m_SettingsHashOld);
-			}
-			if (bRefresh)
-				CMenuContainer::RefreshSearch();
+			if (!settingsReady && !PublishSearchCatalog(false,searchRequest)) continue;
 			searchRequest.searchTime=GetTickCount();
 		}
 
@@ -1393,19 +1460,20 @@ void CSearchManager::GetSearchResults( SearchResults &results )
 	results.metrosettings.clear();
 	results.indexed.clear();
 	results.autocomplete.clear();
-	std::vector<SearchItem> programs, settings, autocomplete;
+	std::shared_ptr<const std::vector<SearchItem>> programs,settings;
+	std::vector<SearchItem> autocomplete;
 	CString searchText;
 	{
-		// Snapshot owned data. Shell/AppID lookups below may pump messages and must
-		// never run under LOCK_DATA or retain references into the worker's vectors.
+		// Copy two owning references, not the catalog strings. The worker has
+		// already sorted programs and resolved AppIDs; there are no Shell calls below.
 		Lock lock(this,LOCK_DATA);
 		searchText=m_SearchText;
 		results.autoCompletePath=m_AutoCompletePath;
 		results.bSearching=(m_LastCompletedId!=m_LastRequestId);
 		if (m_AutoCompletePath.IsEmpty())
 		{
-			programs=m_bProgramsFound?m_ProgramItems:m_ProgramItemsOld;
-			settings=m_bSettingsFound?m_SettingsItems:m_SettingsItemsOld;
+			programs=m_ProgramCatalog;
+			settings=m_SettingsCatalog;
 			results.indexed=m_IndexedItems;
 		}
 		else
@@ -1414,50 +1482,17 @@ void CSearchManager::GetSearchResults( SearchResults &results )
 	bool bSearchSubWord=GetSettingBool(L"SearchSubWord");
 	if (results.autoCompletePath.IsEmpty())
 	{
-		std::sort(programs.begin(),programs.end());
-		results.programs.reserve(programs.size());
-		struct NameGroup
+		if (programs)
 		{
-			const CItemManager::ItemInfo *first;
-			std::set<std::wstring> appIds;
-		};
-		std::map<std::pair<std::wstring,bool>,NameGroup> groups;
-		auto ResolveAppId=[](const CItemManager::ItemInfo *info) -> std::wstring
-		{
-			g_ItemManager.UpdateItemInfo(info,CItemManager::INFO_LINK_APPID);
-			CItemManager::RWLock lock(&g_ItemManager,false,CItemManager::RWLOCK_ITEMS);
-			return std::wstring(info->GetAppid());
-		};
-		for (const auto &item:programs)
-		{
-			if (item.category!=CATEGORY_PROGRAM || !item.MatchText(searchText,bSearchSubWord)) continue;
-			auto key=std::make_pair(std::wstring(item.name),item.bMetroLink);
-			auto inserted=groups.emplace(std::move(key),NameGroup{item.pInfo,{}});
-			if (!inserted.second)
-			{
-				NameGroup &group=inserted.first->second;
-				if (group.appIds.empty()) group.appIds.insert(ResolveAppId(group.first));
-				if (!group.appIds.insert(ResolveAppId(item.pInfo)).second) continue;
-			}
-			results.programs.push_back(item.pInfo);
+			results.programs.reserve(programs->size());
+			OpenShellSearch::SelectPrograms(*programs,CATEGORY_PROGRAM,
+				[&](const SearchItem &item) { return item.MatchText(searchText,bSearchSubWord); },
+				[&](const SearchItem &item) { results.programs.push_back(item.pInfo); });
 		}
-		// Match every setting exactly once on this (UI) thread: keep only the hits,
-		// rank them, then split them by category.
-		size_t matched=0;
-		for (size_t i=0;i<settings.size();i++)
-		{
-			SearchItem &item=settings[i];
-			if (item.category!=CATEGORY_SETTING && item.category!=CATEGORY_METROSETTING) continue;
-			int match=item.MatchText(searchText,bSearchSubWord);
-			if (!match) continue;
-			item.rank=(item.rank&0xFFFFFFFE)|(match>>1);
-			if (matched!=i) std::swap(settings[matched],item);
-			matched++;
-		}
-		settings.erase(settings.begin()+matched,settings.end());
-		std::sort(settings.begin(),settings.end());
-		for (const auto &item:settings)
-			(item.category==CATEGORY_SETTING?results.settings:results.metrosettings).push_back(item.pInfo);
+		if (settings)
+			OpenShellSearch::SelectSettings(*settings,CATEGORY_SETTING,CATEGORY_METROSETTING,
+				[&](const SearchItem &item) { return item.MatchText(searchText,bSearchSubWord); },
+				[&](const SearchItem &item) { (item.category==CATEGORY_SETTING?results.settings:results.metrosettings).push_back(item.pInfo); });
 	}
 	else
 	{

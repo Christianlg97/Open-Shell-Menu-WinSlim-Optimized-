@@ -1,5 +1,28 @@
 # Revisión del código — 12 de noviembre de 2026
 
+## Optimizaciones del motor (fuentes 4.4.1007)
+
+Se implementan cuatro propuestas del [análisis de rendimiento](PERFORMANCE_WINSLIM.md):
+catálogos inmutables de búsqueda con AppID y ordenación en el trabajador, hilos
+creados a demanda, avisos de carpetas agrupados y cancelables, y seguimiento de
+salida del ratón por eventos. También se sustituye la comparación repetida de
+nombres de ajustes por un conjunto y se saca la consulta Shell de los bloqueos
+de datos/rangos. Se conserva el perfil visual completo.
+
+La publicación valida la generación antes y después de resolver duplicados;
+cerrar el menú cancela la recogida y los lectores mantienen su propia referencia.
+La selección elimina duplicados después de filtrar, conservando coincidencias
+por palabras clave distintas. Vaciar una consulta cancela el trabajo indexado
+sin añadir trabajadores. Los avisos se rearman antes de escanear, de modo que
+los cambios durante el escaneo quedan pendientes para otra pasada.
+
+La versión por defecto sube a 4.4.1007 para permitir actualizar el MSI instalado.
+No se ha compilado, instalado ni cambiado la sesión. Se añaden comprobaciones
+estáticas y pruebas nativas de los algoritmos de catálogo y avisos al build manual.
+Pendiente: ejecutar esas pruebas x86/x64, validar el menú real y comparar consumo
+y latencia. La expulsión de iconos requiere antes resolver la propiedad de los
+objetos prestados; no forma parte de este cambio. Los MSI actuales son 4.4.1006.
+
 ## Verificación de los paquetes 4.4.1006 y consumo observado
 
 Se han verificado los MSI x86/x64/ARM64 existentes en `Release` mediante

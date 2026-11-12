@@ -8,6 +8,9 @@
 #include <atldbcli.h>
 #include <vector>
 #include <list>
+#include <memory>
+#include <set>
+#include <string>
 
 const int MAX_SEARCH_RESULTS=100; // per category
 
@@ -97,10 +100,12 @@ private:
 		const CItemManager::ItemInfo *pInfo;
 		int rank; // ignore the item if rank<0
 		bool bMetroLink;
+		size_t duplicateGroup=0; // assigned once by the catalog publisher
+		const wchar_t *Name( void ) const { return name; }
 
 		SearchItem( void ) { category=CATEGORY_INVALID; pInfo=NULL; rank=0; bMetroLink=false; }
 
-		// 0 - no match, 1 - match name, 2 - match keywords
+		// 0 - no match, 1 - match keywords, 2 - match name
 		int MatchText( const wchar_t *search, bool bSearchSubWord ) const { return MatchTextInt(search,name,bSearchSubWord)?2:(MatchTextInt(search,keywords,bSearchSubWord)?1:0); }
 		bool operator<( const SearchItem &item ) const { return rank>item.rank || (rank==item.rank && wcscmp(name,item.name)<0); }
 
@@ -140,10 +145,13 @@ private:
 
 	// LOCK_DATA
 	SearchRequest m_SearchRequest;
-	std::vector<SearchItem> m_ProgramItems; // also LOCK_PROGRAMS
-	std::vector<SearchItem> m_SettingsItems; // also LOCK_PROGRAMS
-	std::vector<SearchItem> m_ProgramItemsOld;
-	std::vector<SearchItem> m_SettingsItemsOld;
+	std::vector<SearchItem> m_ProgramItems; // unpublished builder, writer also holds LOCK_PROGRAMS
+	std::vector<SearchItem> m_SettingsItems;
+	std::set<std::pair<std::wstring,bool>> m_SettingNames; // builder deduplication
+	// Keep the previous complete generation while collecting its replacement.
+	// UI readers own a reference, so CloseMenu/publication cannot invalidate it.
+	std::shared_ptr<const std::vector<SearchItem>> m_ProgramCatalog;
+	std::shared_ptr<const std::vector<SearchItem>> m_SettingsCatalog;
 	unsigned int m_ProgramsHash;
 	unsigned int m_ProgramsHashOld;
 	unsigned int m_SettingsHash;
@@ -215,10 +223,13 @@ private:
 	HANDLE m_SearchEvent;
 	HANDLE m_ExitEvent;
 	HANDLE m_SearchThreads[8];
+	int m_SearchThreadSlots; // created handles, owned by the main thread
 	volatile long m_SearchThreadCount;
 	DWORD m_MainThreadId;
 
 	void LoadItemRanks( void );
+	bool EnsureSearchWorker( void );
+	bool PublishSearchCatalog( bool programs, const SearchRequest &request );
 	void SearchThread( void );
 	static DWORD CALLBACK StaticSearchThread( void *param );
 

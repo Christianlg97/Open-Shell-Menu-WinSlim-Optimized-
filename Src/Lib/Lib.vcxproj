@@ -91,6 +91,8 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="ResourceHelper.h" />
     <ClInclude Include="RustCore.h" />
+    <ClInclude Include="SearchCatalog.h" />
+    <ClInclude Include="DirectoryChangeBatch.h" />
     <ClInclude Include="Settings.h" />
     <ClInclude Include="SettingsParser.h" />
     <ClInclude Include="SettingsUIHelper.h" />

@@ -59,19 +59,59 @@ coste en RAM: los bitmaps, cadenas, PIDLs y estructuras se expanden al cargarse.
 El límite de 512 MiB de `MAX_CACHE_FILE_SIZE` es una defensa de lectura/escritura,
 no un presupuesto de memoria de la caché viva.
 
-## Optimizaciones posibles
+## Optimizaciones implementadas en las fuentes 4.4.1007
 
-Hay margen, sobre todo durante búsquedas, actualización de accesos y sesiones
-largas. Son oportunidades basadas en el código, todavía sin ahorro cuantificado.
-No se ha cambiado el motor en esta revisión de empaquetado y diagnóstico.
+La revisión posterior implementa cuatro de las cinco propuestas. Los MSI de
+`Release` siguen siendo 4.4.1006 hasta que el usuario compile. No hay todavía
+una medición de ahorro ni una validación de ejecución del motor modificado.
 
-| Prioridad | Evidencia en el código | Cambio a evaluar | Validación necesaria |
-|---|---|---|---|
-| 1: búsqueda | `CSearchManager::GetSearchResults` copia las listas de programas/ajustes y ordena los programas en cada llamada, en el hilo de interfaz. Los nombres duplicados pueden resolver AppID mediante el Shell. | Publicar listas inmutables por generación, reutilizar el orden mientras no cambien catálogo/rangos y resolver AppID fuera de la interfaz. | Comparar resultados, orden y latencia con catálogos grandes, escritura rápida y enlaces lentos. Conservar la propiedad de los datos al cerrar/cancelar. |
-| 2: avisos de carpetas | `CItemManager::PreloadItemsThread` procesa una carpeta notificada y duerme 1000 ms antes de recorrerla; varios avisos pueden ocasionar pasadas consecutivas. | Agrupar las carpetas señaladas en una pasada y hacer la espera cancelable con el evento de cierre. | Ráfagas de altas/bajas en varias carpetas: mismos resultados, menos recorridos, cierre sin esa espera fija. El Sleep actual no consume CPU activamente. |
-| 3: hilos de búsqueda | `CSearchManager::Init` crea los ocho hilos de `m_SearchThreads` al iniciar; esperan eventos mientras no hay trabajo. | Evaluar creación gradual y un límite adaptado a la concurrencia real. | Medir memoria comprometida y primera búsqueda. Mantener capacidad de respuesta cuando un proveedor Shell se bloquea; reducir a uno puede empeorarla. |
-| 4: caché de iconos | `ItemInfo`/`IconInfo` se prestan a menús y trabajadores. `ClearCache` conserva objetos vivos para no invalidar referencias. | Introducir propiedad explícita y generaciones antes de implantar un presupuesto de memoria o expulsión de entradas. | Sesiones largas, varios DPI, muchas apps, limpieza durante búsqueda y menús abiertos; medir bytes y objetos GDI. No liberar punteros aún prestados. |
-| 5: seguimiento del botón | `CStartButton::OnTimer` comprueba la salida del puntero cada 30 ms mientras está sobre el botón/zona ampliada. | Evaluar seguimiento por eventos y reservar sondeo para la zona de compatibilidad de la barra. | Medir CPU con puntero quieto sobre el botón, varios monitores y barra autooculta; conservar hover, clic y animación. El temporizador ya se cancela al salir. |
+| Área | Cambio implementado | Efecto previsto |
+|---|---|---|
+| Catálogos de búsqueda | `SearchCatalog.h` ordena programas y agrupa nombres/AppID en el trabajador. `GetSearchResults` toma referencias compartidas a listas inmutables y ordena solo referencias a los ajustes que coinciden. | Evita copiar las listas completas de programas/ajustes, ordenar programas y consultar AppID desde la interfaz en cada actualización. La coincidencia se comprueba antes de suprimir duplicados, para conservar enlaces con palabras clave distintas. |
+| Recogida de ajustes | Un conjunto de nombres sustituye el recorrido de todos los ajustes previos por cada entrada. La consulta Shell del nombre usado para el rango se hace fuera de los bloqueos de datos y rangos. | Elimina la deduplicación cuadrática de ajustes y reduce el tiempo durante el que una consulta Shell puede bloquear al lector. |
+| Hilos de búsqueda | Cero trabajadores al inicializar; se crea el primero al buscar y se añaden otros cuando todos están ocupados, hasta el límite existente de ocho. Borrar la consulta cancela el trabajo indexado sin crear ni despertar un hilo. | Menos pilas y apartamentos COM antes de buscar; se mantiene la concurrencia frente a proveedores lentos. Los hilos creados se reutilizan hasta cerrar el motor, sin retirada en reposo. |
+| Avisos de carpetas | `DirectoryChangeBatch.h` reúne las carpetas señaladas durante la espera de 1000 ms y las rearma antes de recorrerlas. El evento de cierre interrumpe la espera y tiene prioridad. | Una pasada por ráfaga de avisos simultáneos y cierre sin aguardar ese segundo fijo. Los cambios posteriores al rearme quedan pendientes para la siguiente pasada. |
+| Botón de Inicio | `TrackMouseEvent`/`WM_MOUSELEAVE` sustituyen el temporizador de salida mientras el puntero está sobre la ventana. | Evita el sondeo de 30 ms sobre el botón. Se mantiene como respaldo si falla el seguimiento o el puntero pasa a la zona ampliada de la barra. Las animaciones conservan su temporizador. |
+
+El catálogo anterior sigue disponible mientras se enumera el siguiente. La
+publicación comprueba la generación antes y después de preparar los datos, y
+los lectores conservan una referencia propia. El catálogo retirado se libera
+fuera del bloqueo de datos cuando ya no tiene lectores. Cerrar el menú invalida
+la recogida pendiente; los cambios de consulta reutilizan la recogida en curso.
+Los AppID se consultan solo para nombres repetidos. Una primera búsqueda puede
+tardar en publicar si uno de esos proveedores Shell es lento; falta medir ese
+caso, aunque la llamada ya no se hace en el hilo de interfaz.
+
+El trabajador crea y libera su propio resolvedor de AppID; el resolvedor global
+queda reservado a la interfaz. Así se respeta la pertenencia de los objetos a su
+[apartamento COM](https://learn.microsoft.com/en-us/windows/win32/com/single-threaded-apartments)
+sin trasladar un puntero entre hilos. Los AppID obtenidos se guardan en `ItemInfo`.
+
+La quinta propuesta, **limitar la memoria de iconos expulsando entradas**, queda
+pendiente. `ItemInfo`/`IconInfo` se prestan mediante punteros a menús y trabajadores;
+requieren propiedad explícita antes de poder liberarse durante la sesión.
+`ClearCache` conserva esos objetos vivos. No se introduce una expulsión que
+pueda invalidar referencias ni se promete una reducción de RAM en MiB.
+
+### Validación de esta revisión
+
+Sin compilar: las 31 comprobaciones de `tools/verify.py` incluyen publicación por generación, selección
+sin Shell en la interfaz, creación gradual de hilos, bloqueo de rangos, agrupación
+de avisos, propiedad del resolvedor COM y seguimiento del botón. Las cinco
+pruebas del perfil y las doce variantes del instalador con validación XSD
+comprueban que los recursos y la integración continúan intactos.
+
+`tools/MenuPerformanceTests.h`, integrado en `CoreTests`, usa los mismos
+algoritmos C++ de producción: compara orden, rangos y duplicados con la selección
+anterior; incluye palabras clave distintas, AppID vacíos y cancelación. También
+comprueba avisos simultáneos en dos carpetas temporales, rearme y cancelación de
+la espera. Estas pruebas x86/x64 **se ejecutarán con el próximo build manual**.
+
+Después de compilar, probar primera búsqueda y búsquedas repetidas, escritura
+rápida, borrar la consulta, cerrar/reabrir durante la búsqueda, duplicados y
+autocompletado de rutas. Probar también hover, clic, varios monitores/DPI y barra
+autooculta. Comparar recursos con el mismo catálogo y los mismos escenarios;
+las cifras de 4.4.1006 de arriba no cuantifican estas mejoras.
 
 El proyecto ya incorpora búsquedas sin deduplicación cuadrática, índice de
 ajustes, guardado de caché con buffers, menos consultas de geometría desde los
@@ -102,7 +142,7 @@ y repetir los mismos escenarios antes/después, separando la primera apertura
 con caché fría de las aperturas posteriores. Para latencia, comparar mediana y
 percentil 95 de varias aperturas; no inferirlos del muestreo de procesos.
 
-Verificación realizada: 5 pruebas del perfil, 25 comprobaciones generales,
+Verificación anterior de empaquetado: 5 pruebas del perfil, 25 comprobaciones generales,
 12 variantes de fuente del instalador con XSD y extracción/hash de los cuatro
 recursos en los tres MSI existentes. El verificador rechaza un XML de referencia
 distinto y un botón de referencia ausente. Falta una instalación de prueba con
