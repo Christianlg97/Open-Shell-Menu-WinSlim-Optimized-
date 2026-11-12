@@ -20,6 +20,7 @@
 #include "SearchManager.h"
 #include "LogManager.h"
 #include "CacheMaintenance.h"
+#include "SettingsMigration.h"
 #include <dwmapi.h>
 
 #pragma comment(linker, \
@@ -53,6 +54,8 @@ static DWORD CALLBACK DllInitThread( void* )
 	CoInitialize(NULL);
 	// Run before any manager opens a cache; never invalidate live icons/PIDLs.
 	OpenShellCache::MaintainCurrentUser();
+	// Once per user, before the saved settings are read (MSI 4.4.1008+).
+	OpenShellMigration::MigrateCurrentUser();
 	InitSettings();
 
 	wchar_t path[_MAX_PATH];

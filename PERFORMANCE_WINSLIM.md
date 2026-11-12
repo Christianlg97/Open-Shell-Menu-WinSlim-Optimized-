@@ -23,9 +23,10 @@ ni mantener otro proceso residente. Véase [el perfil](Src/Setup/WinSlim/README.
 
 Los recursos visuales del paquete coinciden con los instalados en este equipo;
 el botón de WSCore tiene también el mismo hash. Los valores explícitos actuales
-coinciden con el XML salvo `RUN_AS_ADMIN` de CMD y PowerShell: el perfil lo incluye
-y la cuenta actual conserva ambos accesos sin ese flag. Se conserva la decisión
-ya documentada en `WINSLIM_CHANGES.md`; no se han cambiado los ajustes de la cuenta.
+coinciden con el XML. Hasta 4.4.1007, CMD y PowerShell se guardaban sin
+`RUN_AS_ADMIN`. La cuenta actual se corrigió a mano y su copia previa está en
+`WinSlim Profile/Backups`. Desde 4.4.1008, el menú migra esos dos accesos una vez
+por usuario. Ver `Lib/SettingsMigration.h` y [la revisión](AUDIT_WINSLIM.md).
 
 Los anclados de `PinnedItemsPath` y los accesos a Seguridad y Sonido siguen
 apuntando a WSCore. El MSI incluye el menú y sus recursos visuales; no distribuye

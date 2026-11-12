@@ -1,5 +1,25 @@
 # Revisión del código — 12 de noviembre de 2026
 
+## Migración de accesos de consola (fuentes 4.4.1008)
+
+Las configuraciones guardadas hasta 4.4.1007 conservan Símbolo del sistema y
+PowerShell sin `RUN_AS_ADMIN`, aunque el perfil nuevo lo incluye: los valores
+de `HKCU` tienen prioridad sobre el XML. `Lib/SettingsMigration.h` añade el flag
+solo a los elementos de `MenuItems7` cuyo `Link` efectivo es `cmd.exe` o
+`WindowsPowerShell\v1.0\powershell.exe` del directorio de sistema. Se aplica en
+`DllInitThread`, antes de `InitSettings`, una vez por usuario
+(`WinSlimSettingsMigration=1` en `HKCU\Software\OpenShell\StartMenu`). Así, el
+MSI corrige a cada cuenta en su primer inicio del menú y respeta los cambios
+posteriores del usuario. No borra ajustes, anclados, skins ni XML. El resto del
+valor se reescribe idéntico, byte a byte. Los usuarios sin ajustes guardados no
+reciben claves nuevas.
+
+Simulada sobre la copia previa de la cuenta actual, produce exactamente la
+corrección manual: cambian dos líneas y una segunda pasada no cambia nada.
+`CoreTests` la prueba con una clave volátil temporal; `verify.py` fija el orden de
+arranque. La versión sube a 4.4.1008 para que el MSI actualice al 4.4.1007. No se
+ha compilado.
+
 ## Optimizaciones del motor (fuentes 4.4.1007)
 
 Se implementan cuatro propuestas del [análisis de rendimiento](PERFORMANCE_WINSLIM.md):

@@ -15,6 +15,6 @@
     <TargetName>CoreTests</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup><ClCompile><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile><Link><SubSystem>Console</SubSystem></Link></ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="CoreTests.cpp" /><ClInclude Include="MenuPerformanceTests.h" /></ItemGroup>
+  <ItemGroup><ClCompile Include="CoreTests.cpp" /><ClInclude Include="MenuPerformanceTests.h" /><ClInclude Include="SettingsMigrationTests.h" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

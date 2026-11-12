@@ -59,6 +59,9 @@
     <ClInclude Include="DirectoryChangeBatch.h">
       <Filter>Lib</Filter>
     </ClInclude>
+    <ClInclude Include="SettingsMigration.h">
+      <Filter>Lib</Filter>
+    </ClInclude>
     <ClInclude Include="FNVHash.h">
       <Filter>Strings</Filter>
     </ClInclude>

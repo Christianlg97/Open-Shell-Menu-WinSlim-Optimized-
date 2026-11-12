@@ -65,6 +65,7 @@ static void CheckCacheMaintenance()
 }
 
 #include "MenuPerformanceTests.h"
+#include "SettingsMigrationTests.h"
 
 int main()
 {
@@ -72,6 +73,7 @@ int main()
 	CheckCacheMaintenance();
 	CheckSearchCatalogs();
 	CheckFolderBatches();
+	CheckSettingsMigration();
 	Require(WinSlimCheckedSpan(-1,2,32767,UINT64_MAX)==UINT64_MAX,"Negative cache length accepted");
 	Require(WinSlimCheckedSpan(32768,2,32767,UINT64_MAX)==UINT64_MAX,"Oversized string accepted");
 	Require(WinSlimCheckedSpan(8,2,32767,15)==UINT64_MAX,"Truncated record accepted");

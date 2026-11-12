@@ -1,6 +1,6 @@
 # Open-Shell para WinSlim: cambios y compilación
 
-La versión actual por defecto es **4.4.1007**. Classic Explorer, Classic IE y
+La versión actual por defecto es **4.4.1008**. Classic Explorer, Classic IE y
 Open-Shell Update se han retirado de los proyectos y del instalador. Se conserva
 el menú, sus skins, idiomas y extensiones necesarias. El módulo Dark Mode se ha
 retirado completamente. El [perfil de WinSlim](Src/Setup/WinSlim/README.md) se
@@ -34,7 +34,9 @@ Los elementos personalizados aceptan `RUN_AS_ADMIN` en `ItemN.Settings`: al
 hacer clic se ejecutan elevados, por la misma vía que Ctrl+Mayús+clic (verbo
 `runas` del elemento). Windows sigue mostrando UAC. El perfil lo aplica a
 Símbolo del sistema y PowerShell. No tiene casilla en el editor, pero el editor
-lo conserva al guardar.
+lo conserva al guardar. Desde **4.4.1008**, el primer inicio del menú tras
+instalar añade el flag a esos dos accesos en las configuraciones guardadas antes.
+Se hace una vez por usuario y no cambia nada más.
 
 ## Compilar los MSI separados
 
@@ -42,7 +44,7 @@ Desde CMD en la carpeta del proyecto:
 
 ```bat
 .\build.cmd
-.\build.cmd -Version 4.4.1007 -Language Spanish
+.\build.cmd -Version 4.4.1008 -Language Spanish
 ```
 
 Al abrir `build.cmd` con doble clic, la ventana espera una tecla al terminar,

@@ -353,6 +353,25 @@ class SourceRegressions(unittest.TestCase):
         self.assertNotIn("SetDWORDValue(",reader)
         self.assertIn("FLAG_PROFILE_DEFAULT",source("Src/Lib/Settings.h"))
 
+    def test_saved_console_items_are_migrated_once_before_settings_load(self):
+        init = function_body(source("Src/StartMenu/StartMenuDLL/dllmain.cpp"), "static DWORD CALLBACK DllInitThread(", "STARTMENUAPI void WaitDllInitThread(")
+        self.assertLess(init.index("OpenShellCache::MaintainCurrentUser();"), init.index("OpenShellMigration::MigrateCurrentUser();"))
+        self.assertLess(init.index("OpenShellMigration::MigrateCurrentUser();"), init.index("InitSettings();"))
+        migration = source("Src/Lib/SettingsMigration.h")
+        self.assertIn('L"MenuItems7"', migration)
+        self.assertIn("level>=CurrentLevel", migration)
+        for forbidden in ("RegDeleteValue", "RegDeleteKey", "RegDeleteTree", "DeleteFile", "RegCreateKey"):
+            self.assertNotIn(forbidden, migration)
+        self.assertIn('<ClInclude Include="SettingsMigration.h" />', source("Src/Lib/Lib.vcxproj"))
+        self.assertIn("CheckSettingsMigration();", source("tools/CoreTests.cpp"))
+        # The shipped profile already has the flag the migration adds to saved copies.
+        items = ET.parse(ROOT / "Src/Setup/WinSlim/MenuSettings.xml").getroot().find("MenuItems7")
+        lines = [line.text for line in items.iter("Line")]
+        consoles = [line.split(".")[0] for line in lines if re.search(r"(?i)\.Link=.*\\(cmd|powershell)\.exe$", line)]
+        self.assertEqual(len(consoles), 2)
+        for name in consoles:
+            self.assertIn(f"{name}.Settings=OPEN_UP_CHILDREN|RUN_AS_ADMIN", lines)
+
     def test_independent_msi_outputs(self):
         text = source("tools/Build.ps1")
         self.assertIn("'x86'='Setup32.msi'", text)
