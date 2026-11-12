@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '4.4.1005',
+    [string]$Version = '4.4.1006',
     [ValidateSet('English','Spanish','French','German','Italian','Polish','Russian','ChineseCN','ChineseTW')]
     [string]$Language = 'English',
     [switch]$Full,

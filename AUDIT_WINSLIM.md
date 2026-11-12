@@ -1,5 +1,42 @@
 # Revisión del código — 12 de noviembre de 2026
 
+## Primer clic después de instalar (4.4.1006)
+
+El vídeo `VideoBugPrueba_OpenShell_4.4.1005.mp4` muestra un borde blanco curvo
+a la derecha del botón personalizado y un menú que llega a abrirse y se cierra.
+El usuario confirma que ocurre solo en el primer clic. El BMP instalado contiene
+los tres estados previstos y no incluye ese borde lateral. La inspección del
+equipo muestra un botón de OpenShell de 48 píxeles y un área nativa de Inicio de
+55, por lo que el contorno nativo puede sobresalir a la derecha.
+
+Se ha corregido una activación intermedia innecesaria en
+`CMenuContainer::ToggleStartMenu`: después de activar el botón de OpenShell,
+se activaba también `Shell_TrayWnd` antes de mostrar el menú. Esto permite que
+la inicialización del foco de la barra XAML compita con el menú recién abierto;
+su manejador `WM_ACTIVATE/WA_INACTIVE` lo cierra al perder la activación.
+La secuencia es compatible con el síntoma, aunque el vídeo no sustituye una
+traza de los mensajes del primer clic.
+
+En Windows 11, con un botón de reemplazo visible, se conserva la activación en
+ese botón, que pertenece al mismo hilo que el menú. El cambio incluye la ruta
+de `SetActiveWindow` para la barra con ocultación automática. Para botones
+nativos, botones ocultos y sistemas anteriores se conserva la ruta de la barra.
+No se cambia el BMP, su tamaño, la skin, las animaciones ni el cierre normal del
+menú cuando el usuario pasa a otra aplicación.
+
+Validación: 25 comprobaciones de `tools/verify.py`, 12 variantes del instalador
+y su XSD con `tools/Test-InstallerSource.py`. Una prueba Win32 con ventanas propias
+en un escritorio separado confirma que activar el popup del botón y luego el
+menú no activa a su propietario, mientras que la secuencia anterior sí lo hace.
+Esa prueba verifica el comportamiento de Win32, no ejecuta la DLL modificada.
+
+Pendiente de compilación manual y prueba real: instalar **4.4.1006** sobre
+4.4.1005, hacer el primer clic tras el reinicio de Explorer del instalador,
+mover el puntero a la búsqueda y comprobar que el menú sigue abierto y no
+aparece el contorno nativo. Comprobar también el segundo clic para cerrar,
+clic fuera, teclado, otro monitor y barra con ocultación automática. Los
+binarios existentes en `Release/` siguen siendo 4.4.1005 hasta recompilar.
+
 ## Segunda revisión (mismo día)
 
 Se compararon todos los cambios de WinSlim con Open-Shell original y se revisaron

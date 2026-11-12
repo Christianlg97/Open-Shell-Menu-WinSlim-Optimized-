@@ -217,11 +217,11 @@
 		<Line>Item18.Link=C:\Windows\system32\cmd.exe</Line>
 		<Line>Item18.Label=📟  Símbolo del sistema</Line>
 		<Line>Item18.Tip=Abre la terminal de comandos nativa.</Line>
-		<Line>Item18.Settings=OPEN_UP_CHILDREN</Line>
+		<Line>Item18.Settings=OPEN_UP_CHILDREN|RUN_AS_ADMIN</Line>
 		<Line>Item19.Link=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Line>
 		<Line>Item19.Label=🖥  PowerShell</Line>
 		<Line>Item19.Tip=Ejecuta la terminal de comandos PowerShell.</Line>
-		<Line>Item19.Settings=OPEN_UP_CHILDREN</Line>
+		<Line>Item19.Settings=OPEN_UP_CHILDREN|RUN_AS_ADMIN</Line>
 		<Line>Item20.Command=run</Line>
 		<Line>Item20.Label=↪   Ejecutar</Line>
 		<Line>Item20.Tip=$Menu.RunTip</Line>

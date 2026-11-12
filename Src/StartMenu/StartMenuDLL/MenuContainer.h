@@ -135,6 +135,7 @@ struct StdMenuItem
 		MENU_SPLIT_BUTTON   = 0x002000, // the item is drawn as a split button
 		MENU_ITEM_DISABLED  = 0x004000, // the item is disabled
 		MENU_NORECENT       = 0x008000, // don't show recent items in the root menu (because a sub-menu uses MENU_RECENT_ITEMS)
+		MENU_RUNAS          = 0x010000, // always execute elevated, same path as Ctrl+Shift+click (WinSlim: RUN_AS_ADMIN)
 
 		// style
 		MENU_STYLE_CLASSIC1 = 0x100000,

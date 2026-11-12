@@ -7721,14 +7721,17 @@ HWND CMenuContainer::ToggleStartMenu( int taskbarId, bool bKeyboard, bool bAllPr
 			s_TaskbarState|=ABS_ALWAYSONTOP;
 	}
 
-	if (!bAllPrograms && (s_TaskbarState&ABS_AUTOHIDE))
-	{
-		::SetActiveWindow(s_TaskBar);
-	}
 	if (!bAllPrograms)
 	{
-		// set the taskbar as the foreground window so all keyboard input is sent to the taskbar thread (and be later captured by the start menu)
-		SetForegroundWindow(s_TaskBar);
+		// Bring input to the menu's thread without activating the Win11 XAML taskbar.
+		// On its first activation XAML can queue a focus change that runs after the
+		// menu opens, shows the native focus outline and deactivates/closes our menu.
+		// Our visible replacement button belongs to the same thread and is already
+		// activated above. Keep the tray fallback for native/hidden buttons and older OSes.
+		HWND activationWindow=(IsWin11() && taskBar->bReplaceButton && ::IsWindowVisible(s_StartButton))?s_StartButton:s_TaskBar;
+		if (s_TaskbarState&ABS_AUTOHIDE)
+			::SetActiveWindow(activationWindow);
+		SetForegroundWindow(activationWindow);
 	}
 
 	if (s_bActiveDirectory==-1)

@@ -1663,7 +1663,7 @@ LRESULT CEditMenuDlg::OnOK( WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& bHan
 	m_pItem->tip.TrimLeft();
 	m_pItem->tip.TrimRight();
 
-	m_pItem->settings=0;
+	m_pItem->settings&=StdMenuItem::MENU_RUNAS; // RUN_AS_ADMIN has no checkbox; keep it from the XML
 	bool bForceMultiColumn=(m_pItem->pStdCommand && (wcscmp(m_pItem->pStdCommand->name,L"programs")==0 || wcscmp(m_pItem->pStdCommand->name,L"apps")==0));
 	if (IsDlgButtonChecked(IDC_CHECKSORTZA)==BST_CHECKED) m_pItem->settings|=StdMenuItem::MENU_SORTZA;
 	if (IsDlgButtonChecked(IDC_CHECKSORTZAREC)==BST_CHECKED) m_pItem->settings|=StdMenuItem::MENU_SORTZA_REC;
@@ -1870,6 +1870,7 @@ void CCustomMenuDlg::ParseTreeItemExtra( CTreeItem *pItem, CSettingsParser &pars
 		if (_wcsicmp(token,L"INLINE")==0) pItem->settings|=StdMenuItem::MENU_INLINE;
 		if (_wcsicmp(token,L"SPLIT")==0) pItem->settings|=StdMenuItem::MENU_SPLIT_BUTTON;
 		if (_wcsicmp(token,L"NOEXTENSIONS")==0) pItem->settings|=StdMenuItem::MENU_NOEXTENSIONS;
+		if (_wcsicmp(token,L"RUN_AS_ADMIN")==0) pItem->settings|=StdMenuItem::MENU_RUNAS;
 	}
 }
 
@@ -1892,6 +1893,7 @@ void CCustomMenuDlg::SerializeItemExtra( CTreeItem *pItem, std::vector<wchar_t> 
 	if (pItem->settings&StdMenuItem::MENU_INLINE) AppendString(stringBuilder,L"INLINE|");
 	if (pItem->settings&StdMenuItem::MENU_SPLIT_BUTTON) AppendString(stringBuilder,L"SPLIT|");
 	if (pItem->settings&StdMenuItem::MENU_NOEXTENSIONS) AppendString(stringBuilder,L"NOEXTENSIONS|");
+	if (pItem->settings&StdMenuItem::MENU_RUNAS) AppendString(stringBuilder,L"RUN_AS_ADMIN|");
 	stringBuilder[stringBuilder.size()-1]='\n';
 }
 
@@ -2381,7 +2383,7 @@ LRESULT CEditMenuDlg7::OnOK( WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& bHa
 	m_pItem->tip.TrimLeft();
 	m_pItem->tip.TrimRight();
 
-	m_pItem->settings&=SETTINGS_MASK;
+	m_pItem->settings&=SETTINGS_MASK|StdMenuItem::MENU_RUNAS; // RUN_AS_ADMIN has no checkbox; keep it from the XML
 	if (IsDlgButtonChecked(IDC_CHECKSORTZA)==BST_CHECKED) m_pItem->settings|=StdMenuItem::MENU_SORTZA;
 	if (IsDlgButtonChecked(IDC_CHECKSORTZAREC)==BST_CHECKED) m_pItem->settings|=StdMenuItem::MENU_SORTZA_REC;
 	if (IsDlgButtonChecked(IDC_CHECKSORTONCE)==BST_CHECKED) m_pItem->settings|=StdMenuItem::MENU_SORTONCE;
@@ -3452,6 +3454,7 @@ void CCustomMenuDlg7::SetGroup( CSetting *pGroup, bool bReset )
 					if (_wcsicmp(token,L"MULTICOLUMN")==0) menuItem.settings|=StdMenuItem::MENU_MULTICOLUMN;
 					if (_wcsicmp(token,L"NOEXTENSIONS")==0) menuItem.settings|=StdMenuItem::MENU_NOEXTENSIONS;
 					if (_wcsicmp(token,L"ITEM_DISABLED")==0) menuItem.settings|=StdMenuItem::MENU_ITEM_DISABLED;
+					if (_wcsicmp(token,L"RUN_AS_ADMIN")==0) menuItem.settings|=StdMenuItem::MENU_RUNAS;
 				}
 			}
 			m_Items.push_back(menuItem);
@@ -3645,6 +3648,7 @@ void CCustomMenuDlg7::SerializeData( void )
 			if (menuItem.settings&StdMenuItem::MENU_MULTICOLUMN) AppendString(stringBuilder,L"MULTICOLUMN|");
 			if (menuItem.settings&StdMenuItem::MENU_NOEXTENSIONS) AppendString(stringBuilder,L"NOEXTENSIONS|");
 			if (menuItem.settings&StdMenuItem::MENU_ITEM_DISABLED) AppendString(stringBuilder,L"ITEM_DISABLED|");
+			if (menuItem.settings&StdMenuItem::MENU_RUNAS) AppendString(stringBuilder,L"RUN_AS_ADMIN|");
 			stringBuilder[stringBuilder.size()-1]='\n';
 		}
 	}

@@ -1577,6 +1577,8 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 
 	bool bShift=(!pData || !pData->bNoModifiers) && GetKeyState(VK_SHIFT)<0;
 	bool bCtrl=(!pData || !pData->bNoModifiers) && GetKeyState(VK_CONTROL)<0;
+	// Ctrl+Shift elevates on demand; RUN_AS_ADMIN items always do (only read by the ACTIVATE_EXECUTE paths)
+	bool bElevate=(bShift && bCtrl) || (item.pStdItem && (item.pStdItem->settings&StdMenuItem::MENU_RUNAS));
 
 	if (type==ACTIVATE_OPEN || type==ACTIVATE_OPEN_KBD || type==ACTIVATE_OPEN_SEARCH)
 	{
@@ -1868,7 +1870,7 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 					DoEnvironmentSubst(buf,_countof(buf));
 					if (!searchText.IsEmpty() && (wcswcs(buf,L"%1") || wcswcs(buf,L"%2")))
 						DoSearchSubst(buf,_countof(buf),searchText);
-					ExecuteCommand(buf,bShift && bCtrl,false);
+					ExecuteCommand(buf,bElevate,false);
 				}
 		}
 		return;
@@ -1959,7 +1961,7 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 				flags=CMF_NORMAL;
 			if (type==ACTIVATE_RENAME)
 				flags=CMF_NORMAL|CMF_CANRENAME;
-			if (type==ACTIVATE_EXECUTE && bShift && bCtrl)
+			if (type==ACTIVATE_EXECUTE && bElevate)
 				flags|=CMF_EXTENDEDVERBS;
 			HRESULT hr=pMenu->QueryContextMenu(menu,0,CMD_LAST,CMD_MAX,flags);
 			if (FAILED(hr))
@@ -2277,7 +2279,7 @@ void CMenuContainer::ActivateItem( int index, TActivateType type, const POINT *p
 	{
 		// just pick the default item
 		res=GetMenuDefaultItem(menu,FALSE,0);
-		if (bShift && bCtrl)
+		if (bElevate)
 		{
 			// find the runas verb if available
 			res=-1;
